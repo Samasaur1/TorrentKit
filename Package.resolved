@@ -1,0 +1,16 @@
+{
+  "object": {
+    "pins": [
+      {
+        "package": "BencodingKit",
+        "repositoryURL": "https://github.com/Samasaur1/BencodingKit",
+        "state": {
+          "branch": null,
+          "revision": "70dafbf334fb401109c8bf5aa2b10dbb19e69a9f",
+          "version": "1.0.0"
+        }
+      }
+    ]
+  },
+  "version": 1
+}
