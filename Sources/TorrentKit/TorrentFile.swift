@@ -1,90 +1,74 @@
 import Foundation
 import BencodingKit
+import CryptoKit
 
 public struct TorrentFile {
-    struct Info {
-        struct SingleFileMode {
-            let name: String
+    struct SingleFileData {
+        let name: String
+        let length: Int
+        let md5sum: String?
+
+        public init(from dict: [String: Any]) throws {
+            guard let rawName = dict["name"], let name = rawName as? String else {
+                fatalError()
+            }
+            self.name = name
+            guard let rawLength = dict["length"], let length = rawLength as? Int else {
+                fatalError()
+            }
+            self.length = length
+            self.md5sum = dict["md5sum"] as? String
+        }
+    }
+    struct MultipleFileData {
+        struct FileInfo {
             let length: Int
             let md5sum: String?
+            let path: [String]
 
             public init(from dict: [String: Any]) throws {
-                guard let rawName = dict["name"], let name = rawName as? String else {
-                    fatalError()
-                }
-                self.name = name
                 guard let rawLength = dict["length"], let length = rawLength as? Int else {
                     fatalError()
                 }
                 self.length = length
                 self.md5sum = dict["md5sum"] as? String
-            }
-        }
-        struct MultipleFileMode {
-            struct FileInfo {
-                let length: Int
-                let md5sum: String?
-                let path: [String]
-
-                public init(from dict: [String: Any]) throws {
-                    guard let rawLength = dict["length"], let length = rawLength as? Int else {
-                        fatalError()
-                    }
-                    self.length = length
-                    self.md5sum = dict["md5sum"] as? String
-                    guard let rawPath = dict["path"], let path = rawPath as? [String] else {
-                        fatalError()
-                    }
-                    self.path = path
-                }
-            }
-            let name: String
-            let files: [TorrentFile.Info.MultipleFileMode.FileInfo]
-
-            public init(from dict: [String: Any]) throws {
-                guard let rawName = dict["name"], let name = rawName as? String else {
+                guard let rawPath = dict["path"], let path = rawPath as? [String] else {
                     fatalError()
                 }
-                self.name = name
-                guard let rawFiles = dict["files"], let filesArr = rawFiles as? [[String: Any]] else {
-                    fatalError()
-                }
-                self.files = try filesArr.map(FileInfo.init(from:))
+                self.path = path
             }
         }
-        let pieceLength: Int
-        let pieces: [Data]
-//        let `private`: Bool //Int?
-        let singleFileMode: TorrentFile.Info.SingleFileMode?
-        let multipleFileMode: TorrentFile.Info.MultipleFileMode?
+        let name: String
+        let files: [TorrentFile.MultipleFileData.FileInfo]
 
         public init(from dict: [String: Any]) throws {
-            guard let rawPieceLength = dict["piece length"], let pieceLength = rawPieceLength as? Int else {
+            guard let rawName = dict["name"], let name = rawName as? String else {
                 fatalError()
             }
-            self.pieceLength = pieceLength
-            guard let rawPieces = dict["pieces"], let pieces = rawPieces as? Data, pieces.count.isMultiple(of: 20) else {
+            self.name = name
+            guard let rawFiles = dict["files"], let filesArr = rawFiles as? [[String: Any]] else {
                 fatalError()
             }
-            self.pieces = pieces.chunks(ofSize: 20)
-            if dict["length"] != nil { //single file mode
-                self.singleFileMode = try SingleFileMode(from: dict)
-                self.multipleFileMode = nil
-            } else if dict["files"] != nil { //multiple file mode
-                self.multipleFileMode = try MultipleFileMode(from: dict)
-                self.singleFileMode = nil
-            } else {
-                fatalError()
-            }
+            self.files = try filesArr.map(FileInfo.init(from:))
         }
     }
-    let info: TorrentFile.Info
+    //main->info
+    let pieceLength: Int
+    let pieces: [Data]
+//    let `private`: Bool //Int?
+    let singleFileMode: TorrentFile.SingleFileData?
+    let multipleFileMode: TorrentFile.MultipleFileData?
+
+    //main
     let announce: URL
     let announceList: [URL]?
     let creationDate: Date?
     let comment: String?
     let createdBy: String?
     let encoding: String?
+
+    //computed
+    let infoHash: Data
 
     enum Error: Swift.Error {
         case invalidData
@@ -116,20 +100,41 @@ public struct TorrentFile {
     }
 
     public init(from dict: [String: Any]) throws {
+        //main->info
         guard let rawInfo = dict["info"], let infoDict = rawInfo as? [String: Any] else {
             fatalError()
         }
-        self.info = try TorrentFile.Info(from: infoDict)
+        guard let rawPieceLength = infoDict["piece length"], let pieceLength = rawPieceLength as? Int else {
+            fatalError()
+        }
+        self.pieceLength = pieceLength
+        guard let rawPieces = infoDict["pieces"], let pieces = rawPieces as? Data, pieces.count.isMultiple(of: 20) else {
+            fatalError()
+        }
+        self.pieces = pieces.chunks(ofSize: 20)
+        if infoDict["length"] != nil { //single file mode
+            self.singleFileMode = try SingleFileData(from: infoDict)
+            self.multipleFileMode = nil
+        } else if infoDict["files"] != nil { //multiple file mode
+            self.multipleFileMode = try MultipleFileData(from: infoDict)
+            self.singleFileMode = nil
+        } else {
+            fatalError()
+        }
+
+        //main
         guard let rawAnnounce = dict["announce"], let announceStr = rawAnnounce as? String, let announce = URL(string: announceStr) else {
             fatalError()
         }
         self.announce = announce
-//        if let rawAnnounceList = dict["announce-list"], let announceList = raw
         self.announceList = (dict["announce-list"] as? [String])?.compactMap(URL.init(string:))
         self.creationDate = dict["creation date"] as? Date
         self.comment = dict["comment"] as? String
         self.createdBy = dict["created by"] as? String
         self.encoding = dict["encoding"] as? String
+
+        //computed
+        self.infoHash = Data(Insecure.SHA1.hash(data: try Bencoding.data(from: infoDict)))
     }
 }
 
@@ -155,5 +160,3 @@ extension String {
         return Data(self.unicodeScalars.map { UInt8($0.value) })
     }
 }
-//import CryptoKit
-//Insecure.SHA1.hash(data: <#T##DataProtocol#>)
