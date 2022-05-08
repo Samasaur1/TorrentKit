@@ -2,13 +2,13 @@ import Foundation
 import BencodingKit
 import CryptoKit
 
-public struct TorrentFile {
+struct TorrentFile {
     struct SingleFileData {
         let name: String
         let length: Int
         let md5sum: String?
 
-        public init(from dict: [String: Any]) throws {
+        init(from dict: [String: Any]) {
             guard let rawName = dict["name"], let name = rawName as? String else {
                 fatalError()
             }
@@ -26,7 +26,7 @@ public struct TorrentFile {
             let md5sum: String?
             let path: [String]
 
-            public init(from dict: [String: Any]) throws {
+            init(from dict: [String: Any]) {
                 guard let rawLength = dict["length"], let length = rawLength as? Int else {
                     fatalError()
                 }
@@ -41,7 +41,7 @@ public struct TorrentFile {
         let name: String
         let files: [TorrentFile.MultipleFileData.FileInfo]
 
-        public init(from dict: [String: Any]) throws {
+        init(from dict: [String: Any]) {
             guard let rawName = dict["name"], let name = rawName as? String else {
                 fatalError()
             }
@@ -49,7 +49,7 @@ public struct TorrentFile {
             guard let rawFiles = dict["files"], let filesArr = rawFiles as? [[String: Any]] else {
                 fatalError()
             }
-            self.files = try filesArr.map(FileInfo.init(from:))
+            self.files = filesArr.map(FileInfo.init(from:))
         }
     }
     //main->info
@@ -74,12 +74,17 @@ public struct TorrentFile {
         case invalidData
     }
 
-    public init(fromContentsOf file: URL) throws {
-        try self.init(from: try Data(contentsOf: file))
+    init(fromContentsOf file: URL) {
+        guard let data = try? Data(contentsOf: file) else {
+            fatalError()
+        }
+        self.init(from: data)
     }
 
-    public init(from data: Data) throws {
-        let obj = try Bencoding.object(from: data)
+    init(from data: Data) {
+        guard let obj = try? Bencoding.object(from: data) else {
+            fatalError()
+        }
         guard var dict = obj as? [String: Any] else {
             fatalError()
         }
@@ -96,10 +101,10 @@ public struct TorrentFile {
         info["pieces"] = hash
         dict["info"] = info
 
-        try self.init(from: dict)
+        self.init(from: dict)
     }
 
-    public init(from dict: [String: Any]) throws {
+    init(from dict: [String: Any]) {
         //main->info
         guard let rawInfo = dict["info"], let infoDict = rawInfo as? [String: Any] else {
             fatalError()
@@ -113,10 +118,10 @@ public struct TorrentFile {
         }
         self.pieces = pieces.chunks(ofSize: 20)
         if infoDict["length"] != nil { //single file mode
-            self.singleFileMode = try SingleFileData(from: infoDict)
+            self.singleFileMode = SingleFileData(from: infoDict)
             self.multipleFileMode = nil
         } else if infoDict["files"] != nil { //multiple file mode
-            self.multipleFileMode = try MultipleFileData(from: infoDict)
+            self.multipleFileMode = MultipleFileData(from: infoDict)
             self.singleFileMode = nil
         } else {
             fatalError()
@@ -134,7 +139,10 @@ public struct TorrentFile {
         self.encoding = dict["encoding"] as? String
 
         //computed
-        self.infoHash = Data(Insecure.SHA1.hash(data: try Bencoding.data(from: infoDict)))
+        guard let infoDictData = try? Bencoding.data(from: infoDict) else {
+            fatalError() //This should never happen since infoDict was produced by decoding
+        }
+        self.infoHash = Data(Insecure.SHA1.hash(data: infoDictData))
     }
 }
 
