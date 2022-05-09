@@ -1560,11 +1560,12 @@ public actor TorrentDownload {
                         print("invalid message")
                         print(data.first!)
                         dump(data)
-                        print("discarding but continuing")
                         if flagged {
+                            print("strike 2, closing")
                             socket.close()
                             throw NSError(domain: "com.gauck.sam.torrentkit", code: 0, userInfo: nil) //to break the loop
                         } else {
+                            print("discarding but continuing")
                             flagged = true
                         }
                     }
@@ -1618,6 +1619,9 @@ public actor TorrentDownload {
                     if !peerChoking {
                         if let newRequests = myPieceData?.nextFiveRequests() {
                         newRequestsLoop: for req in newRequests {
+                            guard !outstandingRequests.contains(req) else {
+                                continue
+                            }
                                 message += req.makeMessage()
                                 outstandingRequests.insert(req)
                             if DEBUG {
@@ -1651,6 +1655,7 @@ public actor TorrentDownload {
 extension Socket {
     @discardableResult func read(into data: inout Data, bytes: Int) throws -> Int {
         let buf = UnsafeMutablePointer<CChar>.allocate(capacity: bytes)
+        buf.initialize(repeating: 0, count: bytes)
         let bytesRead = try self.read(into: buf, bufSize: bytes, truncate: true)
         data = Data(bytesNoCopy: buf, count: bytes, deallocator: .custom({ ptr, count in
             ptr.deallocate()
