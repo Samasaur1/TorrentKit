@@ -36,6 +36,26 @@ public actor TorrentDownload {
         var shouldBeListening = false
 
     }
+    private struct /*The*/ Haves /*And The Have-Nots*/ {
+        internal private(set) var arr: [Bool] = []
+        let length: Int
+        init(fromBitfield bitfield: Data, length: Int) {
+            for i in 0..<length {
+                let byte = bitfield[i/8]
+                let val = byte & (UInt8(0b10000000) >> (i % 8))
+                arr.append(val != 0)
+            }
+            self.length = length
+        }
+        subscript(index: Int) -> Bool {
+            get {
+                arr[index]
+            }
+            set {
+                arr[index] = newValue
+            }
+        }
+    }
 
     private let torrentFile: TorrentFile
     private let urlEncodedInfoHash: String
@@ -48,7 +68,9 @@ public actor TorrentDownload {
     private var trackerTask: Task<Void, Error>? = nil
     public private(set) var state: Status {
         didSet {
-            print("state went from \(oldValue) to \(state)")
+            if DEBUG {
+                print("state went from \(oldValue) to \(state)")
+            }
         }
     }
     private let peerQueue = DispatchQueue(label: "com.gauck.sam.torrentkit.queue.peer", attributes: .concurrent)
@@ -90,8 +112,8 @@ public actor TorrentDownload {
 //        self.torrentFile = torrentFile(fromContentsOf: url)
         let torrentFile = TorrentFile(fromContentsOf: url)
         precondition(torrentFile.singleFileMode != nil, "Multiple-file torrents are not yet supported")
-        self.length = torrentFile.singleFileMode?.length ?? torrentFile.multipleFileMode!.files.map { $0.length }.reduce(0, +) //this force-unwrap is safe because the nil-coaslescing operator short-circuits and a torrent file will always be either single-file or multiple-file (https://developer.apple.com/documentation/swift/1539917)
         self.torrentFile = torrentFile
+        self.length = torrentFile.length
         self.handshake = Data([19]) + "BitTorrent protocol".data(using: .ascii)! + Data(repeating: 0, count: 8) + torrentFile.infoHash + self.peerID.data(using: .ascii)!
         FileManager.default.createFile(atPath: "/tmp/\(torrentFile.singleFileMode!.name)", contents: nil)
         self.handle = try! .init(forUpdating: .init(fileURLWithPath: "/tmp/\(torrentFile.singleFileMode!.name)"))
@@ -1003,7 +1025,8 @@ public actor TorrentDownload {
                 print("have \(idx)")
             case 5: //bitfield
                 let bitfield = data[1...]
-                print("bitfield \(bitfield)")
+                let haves = Haves(fromBitfield: bitfield, length: self.torrentFile.pieceCount)
+                print("bitfield \(bitfield), with pieces \(haves.arr.map { $0 ? "1" : "0"}.joined(separator: ""))")
             case 6: //request
                 let idx = UInt32(bigEndian: data[1..<5].to(type: UInt32.self)!)
                 let begin = UInt32(bigEndian: data[5..<9].to(type: UInt32.self)!)

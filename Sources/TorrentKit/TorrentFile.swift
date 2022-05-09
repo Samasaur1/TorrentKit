@@ -69,6 +69,8 @@ struct TorrentFile {
 
     //computed
     let infoHash: Data
+    let length: Int
+    let pieceCount: Int
 
     enum Error: Swift.Error {
         case invalidData
@@ -143,6 +145,8 @@ struct TorrentFile {
             fatalError() //This should never happen since infoDict was produced by decoding
         }
         self.infoHash = Data(Insecure.SHA1.hash(data: infoDictData))
+        self.length = singleFileMode?.length ?? multipleFileMode!.files.map { $0.length }.reduce(0, +) //this force-unwrap is safe because the nil-coaslescing operator short-circuits and a torrent file will always be either single-file or multiple-file (https://developer.apple.com/documentation/swift/1539917)
+        self.pieceCount = Int( (Double(length)/Double(pieceLength)) .rounded(.up) )
     }
 }
 
