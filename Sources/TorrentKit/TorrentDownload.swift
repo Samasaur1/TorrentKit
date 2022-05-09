@@ -1595,6 +1595,8 @@ public actor TorrentDownload {
                             let (iHave, theyHave) = ziptup
                             return !iHave && theyHave
                         }).randomElement() else {
+                            //This socket does not have anything we want
+                            //TODO: stay connected to sockets who don't have anything
                             fatalError("No idea how we could run out of pieces without being finished")
                         }
                         myCurrentWorkingPiece = UInt32(el.offset)
@@ -1656,16 +1658,20 @@ extension Socket {
     @discardableResult func read(into data: inout Data, bytes: Int) throws -> Int {
         let buf = UnsafeMutablePointer<CChar>.allocate(capacity: bytes)
         buf.initialize(repeating: 0, count: bytes)
-        let bytesRead = try self.read(into: buf, bufSize: bytes, truncate: true)
+        var totalBytesRead = 0
+        while totalBytesRead < bytes {
+            let bytesRead = try self.read(into: buf + totalBytesRead, bufSize: bytes - totalBytesRead, truncate: true)
+            totalBytesRead += bytesRead
+        }
         data = Data(bytesNoCopy: buf, count: bytes, deallocator: .custom({ ptr, count in
             ptr.deallocate()
         }))
-        if bytesRead != bytes {
+        if totalBytesRead != bytes {
             if DEBUG {
-                print("Unable to read requested quantity of bytes: wanted \(bytes) but got \(bytesRead)")
+                print("Unable to read requested quantity of bytes: wanted \(bytes) but got \(totalBytesRead)")
             }
         }
-        return bytesRead
+        return totalBytesRead
     }
 }
 extension Data {
