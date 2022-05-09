@@ -1504,6 +1504,10 @@ public actor TorrentDownload {
                         print("piece \(idx) \(begin) \(block)")
                         let req = PieceRequest(idx: idx, begin: begin, length: messageLength - 9)
 
+                        if DEBUG {
+                            print("received response to request for \(req.length) bytes of piece \(req.idx) starting at \(req.begin)")
+                        }
+
                         if outstandingRequests.remove(req) != nil {
                             if req.idx == myCurrentWorkingPiece {
                                 if myPieceData != nil {
@@ -1604,6 +1608,9 @@ public actor TorrentDownload {
                         newRequestsLoop: for req in newRequests {
                                 message += req.makeMessage()
                                 outstandingRequests.insert(req)
+                            if DEBUG {
+                                print("queueing request for \(req.length) bytes of piece \(req.idx) starting at \(req.begin)")
+                            }
                                 if outstandingRequests.count == 5 {
                                     break newRequestsLoop
                                 }
