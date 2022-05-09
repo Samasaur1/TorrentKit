@@ -1443,13 +1443,18 @@ public actor TorrentDownload {
                     //Get message
                     var data = Data()
                     let bytesRead = try socket.read(into: &data, bytes: 4)
-                    let messageLength = UInt32(bigEndian: data.to(type: UInt32.self)!)
-                    if DEBUG {
-                        print("Got a message length of \(messageLength) bytes")
+                    if bytesRead != 4 {
+                        if DEBUG {
+                            print("Unable to read 4 bytes to determine message size!")
+                        }
                     }
+                    let messageLength = UInt32(bigEndian: data.to(type: UInt32.self)!)
                     guard messageLength > 0 else {
                         //This message is a keep-alive; ignore it
                         continue
+                    }
+                    if DEBUG {
+                        print("Got a message length of \(messageLength) bytes")
                     }
                     let moreBytesRead = try socket.read(into: &data, bytes: Int(messageLength))
                     if DEBUG {
@@ -1643,6 +1648,9 @@ extension Socket {
         data = Data(bytesNoCopy: buf, count: bytes, deallocator: .custom({ ptr, count in
             ptr.deallocate()
         }))
+        if DEBUG {
+            print("Unable to read requested quantity of bytes: wanted \(bytes) but got \(bytesRead)")
+        }
         return bytesRead
     }
 }
