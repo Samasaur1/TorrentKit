@@ -1538,6 +1538,7 @@ public actor TorrentDownload {
                         print("port \(port)")
                     default: //invalid message
                         print("invalid message")
+                        dump(data)
                         socket.close()
                         throw NSError(domain: "com.gauck.sam.torrentkit", code: 0, userInfo: nil) //to break the loop
                     }
@@ -1590,8 +1591,12 @@ public actor TorrentDownload {
                     }
                     if !peerChoking {
                         if let newRequests = myPieceData?.nextFiveRequests() {
-                            for req in newRequests {
+                        newRequestsLoop: for req in newRequests {
                                 message += req.makeMessage()
+                                outstandingRequests.insert(req)
+                                if outstandingRequests.count == 5 {
+                                    break newRequestsLoop
+                                }
                             }
                         }
                     }
