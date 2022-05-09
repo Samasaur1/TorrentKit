@@ -46,6 +46,11 @@ public actor TorrentDownload {
                 _haves = haves
             }
         }
+        func _getHaves() -> Haves {
+            shimHavesQueue.sync {
+                _haves
+            }
+        }
         func getHaves(idx: UInt32) -> Bool {
             shimHavesQueue.sync {
                 _haves[idx]
@@ -107,7 +112,7 @@ public actor TorrentDownload {
             self.failedToConnectToPeer()
         }
     }
-    private struct /*The*/ Haves /*And The Have-Nots*/ {
+    struct /*The*/ Haves /*And The Have-Nots*/ {
         internal private(set) var arr: [Bool] = []
         let length: Int
         //This MUST NOT be a slice, but slices can be usable if wrapped in Data
@@ -138,6 +143,101 @@ public actor TorrentDownload {
             set {
                 self[Int(index)] = newValue
             }
+        }
+
+        func repack() -> Data {
+            var data = Data()
+            var currentByte = UInt8(0)
+            var bitInByte = 7
+            for val in arr {
+                if bitInByte < 0 {
+                    data.append(currentByte)
+                    currentByte = 0
+                    bitInByte = 7
+                }
+                guard val else {
+                    bitInByte -= 1
+                    continue
+                }
+                currentByte |= 1 << bitInByte
+                bitInByte -= 1
+            }
+            if bitInByte > -1 {
+                data.append(currentByte)
+            }
+            return data
+        }
+        func makeMessage() -> Data {
+            let packed = repack()
+            let msg = Data(from: UInt32(1 + packed.count).bigEndian) + [5] + packed
+            return msg
+        }
+
+        func newPieces(fromOld old: Haves) -> [UInt32] {
+//            var indices = [UInt32]()
+//            zip(arr, old.arr).enumerated().filter { (idx, tup) in
+//                let (newVal, oldVal) = tup
+//                if newVal != oldVal {
+//                    indices.append(UInt32(idx))
+//                }
+//            }
+//            return indices
+            var indices = [UInt32]()
+            for i in 0..<arr.count {
+                if arr[i] != old.arr[i] {
+                    indices.append(UInt32(i))
+                }
+            }
+            return indices
+        }
+
+        var isComplete: Bool {
+            arr.contains(false)
+        }
+    }
+
+    struct PieceData {
+        struct WrittenSegment {
+            static let MAX_LENGTH: UInt32 = 1 << 14 //2^14; 16KB
+            let offset: UInt32
+            let length: UInt32
+        }
+        private var writtenSegments: [WrittenSegment] = []
+        private let size: UInt32
+
+        init(size: UInt32) {
+            self.size = size
+        }
+
+        mutating func wrote(_ length: UInt32, at offset: UInt32) {
+            var segment = WrittenSegment(offset: offset, length: length)
+            if let idx = writtenSegments.firstIndex(where: { $0.offset + $0.length == offset }) {
+                let oldSegment = writtenSegments.remove(at: idx)
+                segment = .init(offset: oldSegment.offset, length: oldSegment.length + segment.length)
+            }
+            if let idx = writtenSegments.firstIndex(where: { segment.offset + segment.length == $0.offset }) {
+                let oldSegment = writtenSegments.remove(at: idx)
+                segment = .init(offset: segment.offset, length: segment.length + oldSegment.length)
+            }
+            writtenSegments.append(.init(offset: offset, length: length))
+
+            writtenSegments.sort(by: { $0.offset < $1.offset })
+        }
+
+        func nextSegment() -> WrittenSegment? {
+            guard let first = writtenSegments.first else {
+                return .init(offset: 0, length: WrittenSegment.MAX_LENGTH)
+            }
+            if let next = writtenSegments.dropFirst().first {
+                return .init(offset: first.offset + first.length, length: next.offset - (first.offset + first.length))
+            }//else
+            guard first.offset + first.length < size else {
+                return nil //done
+            }
+            if first.offset + first.length + WrittenSegment.MAX_LENGTH > size {
+                return .init(offset: first.offset + first.length, length: size - (first.offset + first.length))
+            }
+            return .init(offset: first.offset + first.length, length: WrittenSegment.MAX_LENGTH)
         }
     }
 
@@ -238,6 +338,8 @@ public actor TorrentDownload {
         }.joined(separator: "")
         self.shim._setHaves(Haves.empty(ofLength: torrentFile.pieceCount))
         state = .off
+
+        print("piece length: \(torrentFile.pieceLength)")
     }
 
     public func begin() {
@@ -1119,13 +1221,20 @@ public actor TorrentDownload {
         return req
     }
 
-    private nonisolated func write(_ data: Data, atOffset offset: UInt64) {
+    private nonisolated func write(_ data: Data, inPiece pieceIdx: UInt32, beginningAt byteOffset: UInt32) {
+        let offset = (pieceIdx * UInt32(self.torrentFile.pieceLength)) + byteOffset
         writingQueue.async { //I feel like `.async` should be fine, because only one `async` block can run at a time, but better safe than sorry //If there is a problem, make this `.sync`
             do {
-                try self.handle.seek(toOffset: offset)
+                try self.handle.seek(toOffset: UInt64(offset))
                 try self.handle.write(contentsOf: data)
             } catch {
                 print("unable to write!")
+            }
+        }
+        if self.shim._getHaves().isComplete {
+            print("Allegedly complete")
+            Task {
+                await self.stop()
             }
         }
     }
@@ -1139,6 +1248,12 @@ public actor TorrentDownload {
                 fatalError("Unable to read requested data")
             }
         }
+    }
+
+    private struct PieceRequest: Equatable, Hashable {
+        let idx: UInt32
+        let begin: UInt32
+        let length: UInt32
     }
 
     /// Set up a background-executing loop for this peer socket connection that uploads and downloads pieces.
@@ -1156,7 +1271,15 @@ public actor TorrentDownload {
                 var peerChoking = true
                 var peerInterested = false
                 var peerHaves = Haves.empty(ofLength: self.torrentFile.pieceCount)
+                var outstandingRequests = 0
+                var canceledRequests = Set<PieceRequest>()
+                var localHavesCopy = self.shim._getHaves()
+                var myCurrentWorkingPiece: UInt32? = nil
+                var myPieceData: PieceData? = nil
+
+                try socket.write(from: localHavesCopy.makeMessage())
                 while self.shim.socketOperationsShouldContinue {
+                    //Get message
                     var data = Data()
                     let bytesRead = try socket.read(into: &data, bytes: 4)
                     let messageLength = UInt32(bigEndian: data.to(type: UInt32.self)!)
@@ -1164,7 +1287,7 @@ public actor TorrentDownload {
                         //This message is a keep-alive; ignore it
                         continue
                     }
-                    let moreBytesRead = try! socket.read(into: &data, bytes: Int(messageLength))
+                    let moreBytesRead = try socket.read(into: &data, bytes: Int(messageLength))
                     switch data.first! {
                     case 0: //choke
                         print("choke")
@@ -1190,24 +1313,44 @@ public actor TorrentDownload {
                         let idx = UInt32(bigEndian: data[1..<5].to(type: UInt32.self)!)
                         let begin = UInt32(bigEndian: data[5..<9].to(type: UInt32.self)!)
                         let length = UInt32(bigEndian: data[9...].to(type: UInt32.self)!)
+                        let req = PieceRequest(idx: idx, begin: begin, length: length)
                         print("request \(idx) \(begin) \(length)")
+
+                        if canceledRequests.contains(req) {
+                            if DEBUG {
+                                print("Request had already been canceled")
+                            }
+                            canceledRequests.remove(req)
+                            continue
+                        }
 
                         let block = self.read(fromPiece: idx, beginningAt: begin, length: length)
                         let output = Data(from: UInt32(9 + messageLength).bigEndian) + [7] + data[1..<9] + block
                         try socket.write(from: output)
                         if DEBUG {
-                            print("Wrote block of length \(length) in piece \(idx) at offset \(begin)")
+                            print("Uploaded block of length \(length) in piece \(idx) at offset \(begin) to peer")
                         }
                     case 7: //piece
                         let idx = UInt32(bigEndian: data[1..<5].to(type: UInt32.self)!)
                         let begin = UInt32(bigEndian: data[5..<9].to(type: UInt32.self)!)
                         let block = data[9...]
                         print("piece \(idx) \(begin) \(block)")
+
+                        if DEBUG {
+                            print("Got block! attempting to write...")
+                        }
+                        self.write(block, inPiece: idx, beginningAt: begin)
+                        if DEBUG {
+                            print("Wrote block in piece \(idx) at offset \(begin) to disk!")
+                        }
                     case 8: //cancel
                         let idx = UInt32(bigEndian: data[1..<5].to(type: UInt32.self)!)
                         let begin = UInt32(bigEndian: data[5..<9].to(type: UInt32.self)!)
                         let length = UInt32(bigEndian: data[9...].to(type: UInt32.self)!)
+                        let req = PieceRequest(idx: idx, begin: begin, length: length)
                         print("cancel \(idx) \(begin) \(length)")
+
+                        canceledRequests.insert(req)
                     case 9: //port
                         let port = UInt16(bigEndian: data[1...].to(type: UInt16.self)!)
                         print("port \(port)")
@@ -1216,6 +1359,50 @@ public actor TorrentDownload {
                         socket.close()
                         throw NSError(domain: "com.gauck.sam.torrentkit", code: 0, userInfo: nil) //to break the loop
                     }
+
+                    //update variables (fetch from sync queue)
+                    let newLocalHavesCopy = self.shim._getHaves()
+                    let newPieces = newLocalHavesCopy.newPieces(fromOld: localHavesCopy)
+                    localHavesCopy = newLocalHavesCopy
+
+                    //update variables (computations)
+                    if peerChoking {
+                        //From the unofficial spec:
+                        //  "When a peer chokes the client, it is a notification that no requests will be answered until the client is unchoked. The client should not attempt to send requests for blocks, and it should consider all pending (unanswered) requests to be discarded by the remote peer."
+                        outstandingRequests = 0
+                    }
+                    if myCurrentWorkingPiece == nil {
+                        guard let el = zip(localHavesCopy.arr, peerHaves.arr).enumerated().filter({ idx, ziptup in
+                            let (iHave, theyHave) = ziptup
+                            return !iHave && theyHave
+                        }).randomElement() else {
+                            fatalError("No idea how we could run out of pieces without being finished")
+                        }
+                        myCurrentWorkingPiece = UInt32(el.offset)
+                        if myCurrentWorkingPiece! == self.torrentFile.pieceCount - 1 {
+                            myPieceData = .init(size: UInt32(self.length % self.torrentFile.pieceLength))
+                        } else {
+                            myPieceData = .init(size: UInt32(self.torrentFile.pieceLength))
+                        }
+                    }
+
+
+                    //send message
+//                    guard !peerChoking else {
+//                        continue
+//                    }
+                    var message = Data()
+                    for newPiece in newPieces {//haves
+                        message += Data(from: UInt32(5).bigEndian) + [4] + Data(from: newPiece.bigEndian)
+                    }
+                    if !peerChoking {
+                        requestingLoop: while outstandingRequests < 5 {
+//                            myCurrentWorkingPiece.pieceData.requestsToMake
+                            //Haves-like type in AvoidActorIsolation
+                        }
+                    }
+
+                    try socket.write(from: message)
                 }
             } catch {
                 self.shim.connectionToPeerClosed()
