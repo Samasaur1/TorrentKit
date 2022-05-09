@@ -1198,6 +1198,8 @@ public actor TorrentDownload {
         var haves = self.shim._getHaves()
         print("our haves, pre-writing: \(haves.bitString)")
         haves[pieceIdx] = true
+        print("our haves, post-writing: \(haves.bitString)")
+        print("thinks it's complete: \(haves.isComplete)")
         self.shim._setHaves(haves)
         if haves.isComplete {
             print("Allegedly complete")
