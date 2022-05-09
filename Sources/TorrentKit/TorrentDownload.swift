@@ -193,7 +193,7 @@ public actor TorrentDownload {
         }
 
         var isComplete: Bool {
-            arr.contains(false)
+            !arr.contains(false)
         }
 
         var bitString: String {
