@@ -307,13 +307,25 @@ public actor TorrentDownload {
                 var connected = true
                 do {
                     let s = try Socket.create()
+                    if DEBUG {
+                        print("Connecting to peer \(myPeer.peerID.hexStringEncoded()) at \(myPeer.ip):\(myPeer.port)")
+                    }
                     try s.connect(to: myPeer.ip, port: myPeer.port)
+                    if DEBUG {
+                        print("Connected to peer \(myPeer.peerID.hexStringEncoded()) at \(myPeer.ip):\(myPeer.port)")
+                    }
                     try s.write(from: self.handshake)
+                    if DEBUG {
+                        print("Wrote handshake to peer \(myPeer.peerID.hexStringEncoded()) at \(myPeer.ip):\(myPeer.port)")
+                    }
                     let handshake_buf = UnsafeMutablePointer<CChar>.allocate(capacity: 68)
                     defer {
                         handshake_buf.deallocate()
                     }
                     let bytesRead = try s.read(into: handshake_buf, bufSize: 68, truncate: true)
+                    if DEBUG {
+                        print("Read handshake from peer \(myPeer.peerID.hexStringEncoded()) at \(myPeer.ip):\(myPeer.port)")
+                    }
                     //if the remote connection closes, might throw in above line, `bytesRead` might be 0, or might fail the below check
                     guard !s.remoteConnectionClosed else {
                         return
@@ -323,11 +335,17 @@ public actor TorrentDownload {
                     }
                     let _infoHash = Data(bytesNoCopy: handshake_buf + 28, count: 20, deallocator: .none)
                     guard _infoHash == self.torrentFile.infoHash else {
+                        if DEBUG {
+                            print("Peer \(myPeer.peerID.hexStringEncoded()) had infoHash \(_infoHash.hexStringEncoded()) but this download has infoHash \(self.torrentFile.infoHash.hexStringEncoded()); closing socket")
+                        }
                         s.close() //should never happen because the peer would just close the connection
                         return
                     }
                     let _peerID = Data(bytes: handshake_buf + 48, count: 20)
                     guard myPeer.peerID == _peerID else {
+                        if DEBUG {
+                            print("Peer \(myPeer.peerID.hexStringEncoded()) somehow changed to peerID \(_peerID.hexStringEncoded())")
+                        }
                         s.close()
                         return
                     }
