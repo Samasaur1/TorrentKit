@@ -9,6 +9,7 @@ import Foundation
 import Dispatch
 import BencodingKit
 import Socket
+import CryptoKit
 
 public var DEBUG = true
 public var SOCKETEE = false
@@ -184,7 +185,7 @@ public actor TorrentDownload {
 //            return indices
             var indices = [UInt32]()
             for i in 0..<arr.count {
-                if arr[i] != old.arr[i] {
+                if arr[i] && !old.arr[i] {
                     indices.append(UInt32(i))
                 }
             }
@@ -193,51 +194,6 @@ public actor TorrentDownload {
 
         var isComplete: Bool {
             arr.contains(false)
-        }
-    }
-
-    struct PieceData {
-        struct WrittenSegment {
-            static let MAX_LENGTH: UInt32 = 1 << 14 //2^14; 16KB
-            let offset: UInt32
-            let length: UInt32
-        }
-        private var writtenSegments: [WrittenSegment] = []
-        private let size: UInt32
-
-        init(size: UInt32) {
-            self.size = size
-        }
-
-        mutating func wrote(_ length: UInt32, at offset: UInt32) {
-            var segment = WrittenSegment(offset: offset, length: length)
-            if let idx = writtenSegments.firstIndex(where: { $0.offset + $0.length == offset }) {
-                let oldSegment = writtenSegments.remove(at: idx)
-                segment = .init(offset: oldSegment.offset, length: oldSegment.length + segment.length)
-            }
-            if let idx = writtenSegments.firstIndex(where: { segment.offset + segment.length == $0.offset }) {
-                let oldSegment = writtenSegments.remove(at: idx)
-                segment = .init(offset: segment.offset, length: segment.length + oldSegment.length)
-            }
-            writtenSegments.append(.init(offset: offset, length: length))
-
-            writtenSegments.sort(by: { $0.offset < $1.offset })
-        }
-
-        func nextSegment() -> WrittenSegment? {
-            guard let first = writtenSegments.first else {
-                return .init(offset: 0, length: WrittenSegment.MAX_LENGTH)
-            }
-            if let next = writtenSegments.dropFirst().first {
-                return .init(offset: first.offset + first.length, length: next.offset - (first.offset + first.length))
-            }//else
-            guard first.offset + first.length < size else {
-                return nil //done
-            }
-            if first.offset + first.length + WrittenSegment.MAX_LENGTH > size {
-                return .init(offset: first.offset + first.length, length: size - (first.offset + first.length))
-            }
-            return .init(offset: first.offset + first.length, length: WrittenSegment.MAX_LENGTH)
         }
     }
 
@@ -1231,7 +1187,10 @@ public actor TorrentDownload {
                 print("unable to write!")
             }
         }
-        if self.shim._getHaves().isComplete {
+        var haves = self.shim._getHaves()
+        haves[pieceIdx] = true
+        self.shim._setHaves(haves)
+        if haves.isComplete {
             print("Allegedly complete")
             Task {
                 await self.stop()
@@ -1250,10 +1209,212 @@ public actor TorrentDownload {
         }
     }
 
-    private struct PieceRequest: Equatable, Hashable {
+    struct PieceRequest: Equatable, Hashable {
         let idx: UInt32
         let begin: UInt32
         let length: UInt32
+
+        func makeMessage() -> Data {
+            return Data(from: UInt32(13).bigEndian) + [6] + Data(from: idx.bigEndian) + Data(from: begin.bigEndian) + Data(from: length.bigEndian)
+        }
+    }
+
+    struct PieceData {
+        struct WrittenSegment {
+            static let MAX_LENGTH: UInt32 = 1 << 14 //2^14; 16KB
+            let offset: UInt32
+            let length: UInt32
+            var data = Data()
+            init(_ d: Data, at offset: UInt32, of length: UInt32) {
+                self.data = d
+                self.offset = offset
+                self.length = length
+            }
+
+            func before(subsequent: WrittenSegment) -> WrittenSegment {
+                precondition(self.offset + self.length == subsequent.offset)
+                return .init(self.data + subsequent.data, at: self.offset, of: self.length + subsequent.length)
+            }
+            func after(previous: WrittenSegment) -> WrittenSegment {
+                precondition(previous.offset + previous.length == self.offset)
+                return .init(previous.data + self.data, at: previous.offset, of: previous.length + self.length)
+            }
+        }
+        let idx: UInt32
+        private let size: UInt32
+        private let infoHash: Data
+        private var writtenSegments: [WrittenSegment] = []
+
+        init(idx: UInt32, size: UInt32, infoHash: Data) {
+            self.idx = idx
+            self.size = size
+            self.infoHash = infoHash
+        }
+
+        mutating func receive(_ data: Data, for request: PieceRequest) {
+            var segment = WrittenSegment(data, at: request.begin, of: request.length)
+            if let idx = writtenSegments.firstIndex(where: { $0.offset + $0.length == segment.offset }) {
+                let previous = writtenSegments.remove(at: idx)
+                segment = segment.after(previous: previous)
+            }
+            if let idx = writtenSegments.firstIndex(where: { segment.offset + segment.length == $0.offset }) {
+                let subsequent = writtenSegments.remove(at: idx)
+                segment = segment.before(subsequent: subsequent)
+            }
+            writtenSegments.append(segment)
+
+            writtenSegments.sort(by: { $0.offset < $1.offset })
+        }
+
+        func nextFiveRequests() -> [PieceRequest] {
+//            guard let first = writtenSegments.first else {
+//                //no segments
+//                let fullPieces = WrittenSegment.MAX_LENGTH/size
+//                if fullPieces >= 5 {
+//                    var requests = [PieceRequest]()
+//                    var offset = UInt32(0)
+//                    for _ in 0..<5 {
+//                        requests.append(.init(idx: idx, begin: offset, length: WrittenSegment.MAX_LENGTH))
+//                        offset += WrittenSegment.MAX_LENGTH
+//                    }
+//                    return requests
+//                } else { //fullPieces < 5
+//                    var requests = [PieceRequest]()
+//                    var offset = UInt32(0)
+//                    for _ in 0..<fullPieces {
+//                        requests.append(.init(idx: idx, begin: offset, length: WrittenSegment.MAX_LENGTH))
+//                        offset += WrittenSegment.MAX_LENGTH
+//                    }
+//                    if offset < size {
+//                        requests.append(.init(idx: idx, begin: offset, length: size - offset))
+//                    }
+//                    return requests
+//                }
+//            }
+//            var requests = [PieceRequest]()
+//            //first == first segment
+//            guard first.offset == 0 else {
+//                var offset = UInt32(0)
+//                while offset + WrittenSegment.MAX_LENGTH <= first.offset {
+//                    requests.append(.init(idx: idx, begin: offset, length: WrittenSegment.MAX_LENGTH))
+//                    offset += WrittenSegment.MAX_LENGTH
+//                    if requests.count == 5 {
+//                        return requests
+//                    }
+//                }
+//                if offset < first.offset {
+//                    requests.append(.init(idx: idx, begin: offset, length: first.offset - offset))
+//                    if requests.count == 5 {
+//                        return requests
+//                    }
+//                }
+//            }
+//            var offset = first.offset + first.length
+//            guard let next = writtenSegments.dropFirst().first else {
+//                //only one piece
+//                while offset + WrittenSegment.MAX_LENGTH <= size {
+//                    requests.append(.init(idx: idx, begin: offset, length: WrittenSegment.MAX_LENGTH))
+//                    offset += WrittenSegment.MAX_LENGTH
+//                    if requests.count == 5 {
+//                        return requests
+//                    }
+//                }
+//                if offset < size {
+//                    requests.append(.init(idx: idx, begin: offset, length: size - offset))
+//                    if requests.count == 5 {
+//                        return requests
+//                    }
+//                }
+//                return requests
+//            }
+//            //precondition(offset < next.offset, "These two segments should have been joined!")
+//            while offset + WrittenSegment.MAX_LENGTH <= next.offset {
+//                requests.append(.init(idx: idx, begin: offset, length: WrittenSegment.MAX_LENGTH))
+//                offset += WrittenSegment.MAX_LENGTH
+//                if requests.count == 5 {
+//                    return requests
+//                }
+//            }
+//            if offset < next.offset {
+//                requests.append(.init(idx: idx, begin: offset, length: next.offset - offset))
+//                if requests.count == 5 {
+//                    return requests
+//                }
+//            }
+            var offset = UInt32(0)
+            var iter = writtenSegments.makeIterator()
+            var requests = [PieceRequest]()
+            while true {
+                guard let next = iter.next() else {
+                    while offset + WrittenSegment.MAX_LENGTH <= size {
+                        requests.append(.init(idx: idx, begin: offset, length: WrittenSegment.MAX_LENGTH))
+                        offset += WrittenSegment.MAX_LENGTH
+                        if requests.count == 5 {
+                            return requests
+                        }
+                    }
+                    if offset < size {
+                        requests.append(.init(idx: idx, begin: offset, length: size - offset))
+                        if requests.count == 5 {
+                            return requests
+                        }
+                    }
+                    return requests
+                }
+                if offset > next.offset {
+                    fatalError()
+                }
+                if offset == next.offset {
+                    //This better only happen for the first piece, or they should have been joined
+                    precondition(offset == 0)
+                    offset = next.length
+                    continue
+                }
+                //offset < next.offset
+                while offset + WrittenSegment.MAX_LENGTH <= next.offset {
+                    requests.append(.init(idx: idx, begin: offset, length: WrittenSegment.MAX_LENGTH))
+                    offset += WrittenSegment.MAX_LENGTH
+                    if requests.count == 5 {
+                        return requests
+                    }
+                }
+                if offset < next.offset {
+                    requests.append(.init(idx: idx, begin: offset, length: next.offset - offset))
+                    offset = next.offset + next.length
+                    if requests.count == 5 {
+                        return requests
+                    }
+                }
+            }
+        }
+
+        var isComplete: Bool {
+            guard writtenSegments.count == 1 else {
+                return false
+            }
+            let seg = writtenSegments[0]
+            if DEBUG {
+                print("Piece \(idx) is\(seg.offset == 0 && seg.length == size ? "" : " not") complete")
+            }
+            return seg.offset == 0 && seg.length == size
+        }
+
+        func verify() -> Data? {
+            if DEBUG {
+                print("Attempting to verify piece \(idx)")
+            }
+            guard isComplete else {
+                return nil
+            }
+            let hash = Data(Insecure.SHA1.hash(data: writtenSegments[0].data))
+            if DEBUG {
+                print("Piece \(idx) is\(hash == infoHash ? "" : " not") verified")
+            }
+            if hash == infoHash {
+                return writtenSegments[0].data
+            }
+            return nil
+        }
     }
 
     /// Set up a background-executing loop for this peer socket connection that uploads and downloads pieces.
@@ -1271,7 +1432,7 @@ public actor TorrentDownload {
                 var peerChoking = true
                 var peerInterested = false
                 var peerHaves = Haves.empty(ofLength: self.torrentFile.pieceCount)
-                var outstandingRequests = 0
+                var outstandingRequests = Set<PieceRequest>()
                 var canceledRequests = Set<PieceRequest>()
                 var localHavesCopy = self.shim._getHaves()
                 var myCurrentWorkingPiece: UInt32? = nil
@@ -1307,8 +1468,8 @@ public actor TorrentDownload {
                         print("have \(idx)")
                     case 5: //bitfield
                         let bitfield = Data(data[1...])
-                        let haves = Haves(fromBitfield: bitfield, length: self.torrentFile.pieceCount)
-                        print("bitfield \(bitfield), with pieces \(haves.arr.map { $0 ? "1" : "0"}.joined(separator: ""))")
+                        peerHaves = Haves(fromBitfield: bitfield, length: self.torrentFile.pieceCount)
+                        print("bitfield \(bitfield), with pieces \(peerHaves.arr.map { $0 ? "1" : "0"}.joined(separator: ""))")
                     case 6: //request
                         let idx = UInt32(bigEndian: data[1..<5].to(type: UInt32.self)!)
                         let begin = UInt32(bigEndian: data[5..<9].to(type: UInt32.self)!)
@@ -1333,16 +1494,37 @@ public actor TorrentDownload {
                     case 7: //piece
                         let idx = UInt32(bigEndian: data[1..<5].to(type: UInt32.self)!)
                         let begin = UInt32(bigEndian: data[5..<9].to(type: UInt32.self)!)
-                        let block = data[9...]
+                        let block = Data(data[9...])
                         print("piece \(idx) \(begin) \(block)")
+                        let req = PieceRequest(idx: idx, begin: begin, length: messageLength - 9)
 
-                        if DEBUG {
-                            print("Got block! attempting to write...")
+                        if outstandingRequests.remove(req) != nil {
+                            if req.idx == myCurrentWorkingPiece {
+                                if myPieceData != nil {
+                                    myPieceData!.receive(block, for: req)
+                                } else {
+                                    if DEBUG {
+                                        print("Cannot find piece data; ignoring piece")
+                                    }
+                                }
+                            } else {
+                                if DEBUG {
+                                    print("Received block for incorrect piece; ignoring")
+                                }
+                            }
+                        } else {
+                            if DEBUG {
+                                print("Unexpected request; ignoring")
+                            }
                         }
-                        self.write(block, inPiece: idx, beginningAt: begin)
-                        if DEBUG {
-                            print("Wrote block in piece \(idx) at offset \(begin) to disk!")
-                        }
+
+//                        if DEBUG {
+//                            print("Got block! attempting to write...")
+//                        }
+//                        self.write(block, inPiece: idx, beginningAt: begin)
+//                        if DEBUG {
+//                            print("Wrote block in piece \(idx) at offset \(begin) to disk!")
+//                        }
                     case 8: //cancel
                         let idx = UInt32(bigEndian: data[1..<5].to(type: UInt32.self)!)
                         let begin = UInt32(bigEndian: data[5..<9].to(type: UInt32.self)!)
@@ -1369,7 +1551,16 @@ public actor TorrentDownload {
                     if peerChoking {
                         //From the unofficial spec:
                         //  "When a peer chokes the client, it is a notification that no requests will be answered until the client is unchoked. The client should not attempt to send requests for blocks, and it should consider all pending (unanswered) requests to be discarded by the remote peer."
-                        outstandingRequests = 0
+                        outstandingRequests = []
+                    }
+                    if true == myPieceData?.isComplete {
+                        if let data = myPieceData?.verify() {
+                            if DEBUG {
+                                print("Socket completed piece \(myPieceData!.idx)")
+                            }
+                            self.write(data, inPiece: myPieceData!.idx, beginningAt: 0)
+                            myCurrentWorkingPiece = nil
+                        }
                     }
                     if myCurrentWorkingPiece == nil {
                         guard let el = zip(localHavesCopy.arr, peerHaves.arr).enumerated().filter({ idx, ziptup in
@@ -1379,13 +1570,15 @@ public actor TorrentDownload {
                             fatalError("No idea how we could run out of pieces without being finished")
                         }
                         myCurrentWorkingPiece = UInt32(el.offset)
+                        if DEBUG {
+                            print("Socket has decided to work on piece \(el.offset)")
+                        }
                         if myCurrentWorkingPiece! == self.torrentFile.pieceCount - 1 {
-                            myPieceData = .init(size: UInt32(self.length % self.torrentFile.pieceLength))
+                            myPieceData = .init(idx: myCurrentWorkingPiece!, size: UInt32(self.length % self.torrentFile.pieceLength), infoHash: self.torrentFile.pieces[Int(myCurrentWorkingPiece!)])
                         } else {
-                            myPieceData = .init(size: UInt32(self.torrentFile.pieceLength))
+                            myPieceData = .init(idx: myCurrentWorkingPiece!, size: UInt32(self.torrentFile.pieceLength), infoHash: self.torrentFile.pieces[Int(myCurrentWorkingPiece!)])
                         }
                     }
-
 
                     //send message
 //                    guard !peerChoking else {
@@ -1396,9 +1589,20 @@ public actor TorrentDownload {
                         message += Data(from: UInt32(5).bigEndian) + [4] + Data(from: newPiece.bigEndian)
                     }
                     if !peerChoking {
-                        requestingLoop: while outstandingRequests < 5 {
-//                            myCurrentWorkingPiece.pieceData.requestsToMake
-                            //Haves-like type in AvoidActorIsolation
+                        if let newRequests = myPieceData?.nextFiveRequests() {
+                            for req in newRequests {
+                                message += req.makeMessage()
+                            }
+                        }
+                    }
+                    if amChoking {
+                        amChoking = false
+                        message += Data(from: UInt32(1).bigEndian) + [1]
+                    }
+                    if !amInterested {
+                        if !peerHaves.newPieces(fromOld: localHavesCopy).isEmpty {
+                            amInterested = true
+                            message += Data(from: UInt32(1).bigEndian) + [2]
                         }
                     }
 
