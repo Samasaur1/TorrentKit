@@ -361,11 +361,11 @@ public actor TorrentDownload {
 
             peerManagementQueue.async {
                 while self.shim.socketOperationsShouldContinue {
-                    if DEBUG {
-                        print("Attempting to form connection to new peer")
-                    }
                     guard let peer = self.shim.nextPeerForConnection() else {
                         continue
+                    }
+                    if DEBUG {
+                        print("Attempting to form connection to new peer")
                     }
                     //here we should move to peerQueue, because as it stands we only connect one at a time
                     do {
@@ -391,10 +391,10 @@ public actor TorrentDownload {
                         }
                         //if the remote connection closes, might throw in above line, `bytesRead` might be 0, or might fail the below check
                         guard !s.remoteConnectionClosed else {
-                            throw NSError() //the error doesn't matter because it gets caught immediately and ignored
+                            throw NSError(domain: "com.gauck.sam.torrentkit", code: 0, userInfo: nil) //the error doesn't matter because it gets caught immediately and ignored
                         }
                         guard bytesRead > 0 else {
-                            throw NSError()
+                            throw NSError(domain: "com.gauck.sam.torrentkit", code: 0, userInfo: nil)
                         }
                         let _infoHash = Data(bytesNoCopy: handshake_buf + 28, count: 20, deallocator: .none)
                         guard _infoHash == self.torrentFile.infoHash else {
@@ -402,7 +402,7 @@ public actor TorrentDownload {
                                 print("Peer \(peer.peerID.hexStringEncoded()) had infoHash \(_infoHash.hexStringEncoded()) but this download has infoHash \(self.torrentFile.infoHash.hexStringEncoded()); closing socket")
                             }
                             s.close() //should never happen because the peer would just close the connection
-                            throw NSError()
+                            throw NSError(domain: "com.gauck.sam.torrentkit", code: 0, userInfo: nil)
                         }
                         let _peerID = Data(bytes: handshake_buf + 48, count: 20)
                         guard peer.peerID == _peerID else {
@@ -410,12 +410,12 @@ public actor TorrentDownload {
                                 print("Peer \(peer.peerID.hexStringEncoded()) somehow changed to peerID \(_peerID.hexStringEncoded())")
                             }
                             s.close()
-                            throw NSError()
+                            throw NSError(domain: "com.gauck.sam.torrentkit", code: 0, userInfo: nil)
                         }
                         self.addPeerSocket(s)
                     } catch {
                         if DEBUG {
-                            print("Caught an error while trying to connect to peer \(peer.peerID.hexStringEncoded()) (most likely custom error); ignoring (continues to next peer")
+                            print("Caught an error while trying to connect to peer \(peer.peerID.hexStringEncoded()) (most likely custom error); ignoring (continues to next peer)")
                         }
                         self.shim.failedToConnectToPeer()
                     }
@@ -1143,7 +1143,7 @@ public actor TorrentDownload {
                     default: //invalid message
                         print("invalid message")
                         socket.close()
-                        throw NSError() //to break the loop
+                        throw NSError(domain: "com.gauck.sam.torrentkit", code: 0, userInfo: nil) //to break the loop
                     }
                 }
             } catch {
