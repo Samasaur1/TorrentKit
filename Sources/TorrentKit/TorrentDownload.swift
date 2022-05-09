@@ -10,6 +10,9 @@ import Dispatch
 import BencodingKit
 import Socket
 
+public var DEBUG = true
+public var SOCKETEE = false
+
 public actor TorrentDownload {
     private struct PeerData {
         let ip: String
@@ -17,8 +20,11 @@ public actor TorrentDownload {
         let peerID: Data
 
         init(from dict: [String: Any]) {
+            if DEBUG {
+                print("initting peerdata with dict \(dict)")
+            }
             ip = dict["ip"] as! String
-            port = Int32(dict["port"] as! String)!
+            port = Int32(dict["port"] as! Int)
             peerID = (dict["peer id"] as! String).hashify()
         }
     }
@@ -144,16 +150,24 @@ public actor TorrentDownload {
         precondition(state == .off)
         state = .beginning
         serverSocket = try! .create()
-        listener: for _port in 6881...6889 {
-            do {
-                try serverSocket.listen(on: _port)
-                self.port = Int32(_port)
-                print("listening socket bound to port \(_port)")
-                break listener
-            } catch {
-                if _port == 6889 {
-                    //exhausted all ports
-                    fatalError("Cannot bind to port")
+        if SOCKETEE {
+            try! serverSocket.listen(on: 6882)
+            self.port = 6881
+            print("Advertising listen on 6881 but forced listen on 6882; use socketee 6881 localhost 6882 verbose")
+        } else {
+            listener: for _port in 6881...6889 {
+                do {
+                    try serverSocket.listen(on: _port)
+                    self.port = Int32(_port)
+                    if DEBUG {
+                        print("listening socket bound to port \(_port)")
+                    }
+                    break listener
+                } catch {
+                    if _port == 6889 {
+                        //exhausted all ports
+                        fatalError("Cannot bind to port")
+                    }
                 }
             }
         }
@@ -161,20 +175,31 @@ public actor TorrentDownload {
         listenQueue.async {
             while self.shim.shouldBeListening {
                 do {
+                    if DEBUG {
+                        print("Waiting for incoming connection to socket")
+                    }
                     let s = try self.shim.serverSocket.acceptClientConnection()
+                    if DEBUG {
+                        print("Got incoming connection to socket from \(s.remoteHostname):\(s.remotePort)")
+                    }
                     let handshake_buf = UnsafeMutablePointer<CChar>.allocate(capacity: 68)
                     defer {
                         handshake_buf.deallocate()
                     }
-                    let _ = try s.read(into: handshake_buf, bufSize: 68, truncate: true)
-//                    let _handshake = Data(bytesNoCopy: handshake_buf, count: 68, deallocator: .none)
-//                    let _infoHash = _handshake[28..<48]
-                    let _infoHash = Data(bytesNoCopy: handshake_buf + 28, count: 20, deallocator: .none)
+                    var data = Data()
+                    let _ = try s.read(into: &data, bytes: 68)
+                    let _infoHash = data[28..<48]
                     guard _infoHash == self.torrentFile.infoHash else {
+                        if DEBUG {
+                            print("Incoming connection had infoHash \(_infoHash.hexStringEncoded()) but this download has infoHash \(self.torrentFile.infoHash.hexStringEncoded()); closing socket")
+                        }
                         s.close()
                         return
                     }
-                    let _peerID = Data(bytes: handshake_buf + 48, count: 20)
+                    let _peerID = data[48...]
+                    if DEBUG {
+                        print("Got peer ID \(_peerID.hexStringEncoded())")
+                    }
                     try s.write(from: self.handshake)
                     self.addPeerSocket(s)
                 } catch {}
@@ -183,13 +208,19 @@ public actor TorrentDownload {
         Task {
             let req = buildTrackerRequest(uploaded: 0, downloaded: 0, left: self.length, event: "started")
 
+            if DEBUG {
+                print("Making initial URLRequest")
+            }
             let (data, response) = try await URLSession.shared.data(for: req)
 
             guard let response = response as? HTTPURLResponse else {
-                return
+                fatalError("Starting request had invalid response")
             }
             guard response.statusCode == 200 else {
-                return
+                try! data.write(to: .init(fileURLWithPath: "/tmp/debug.dat"))
+                dump(data)
+                dump(response)
+                fatalError("Starting request had valid response with non-OK error code")
             }
 
             guard let obj = try? Bencoding.object(from: data), let dict = obj as? [String: Any] else {
@@ -207,9 +238,21 @@ public actor TorrentDownload {
             }
             self.interval = interval
 
+            if DEBUG {
+                print("Starting intermittent tracker task")
+            }
             trackerTask = Task {
+                if DEBUG {
+                    print("Intermittent tracker task has begun!")
+                }
                 while true {
+                    if DEBUG {
+                        print("Tracker task will wait")
+                    }
                     try await Task.sleep(nanoseconds: UInt64(self.interval) * NSEC_PER_SEC)
+                    if DEBUG {
+                        print("Tracker task will ping")
+                    }
                     try await regularTrackerPing()
                 }
             }
@@ -219,17 +262,23 @@ public actor TorrentDownload {
             }
 
             guard let incomplete = dict["incomplete"] as? Int else {
-                return
+                fatalError()
             }
             guard let complete = dict["complete"] as? Int else {
-                return
+                fatalError()
             }
 
+            if DEBUG {
+                print("Attempting to convert peers dict")
+            }
             guard let peersDict = dict["peers"] as? [[String: Any]] else {
-                return
+                fatalError("No peers!")
             }
             let peers = peersDict.map(PeerData.init(from:))
             self.peers = peers
+            if DEBUG {
+                print("Got peers!")
+            }
 
             peerQueue.async {
                 let myPeer = peers.first!
@@ -839,6 +888,9 @@ public actor TorrentDownload {
     }
 
     private func regularTrackerPing() async throws {
+        if DEBUG {
+            print("regularTrackerPing")
+        }
         let downloaded = self.downloaded
         let left = self.length - downloaded
         let req = buildTrackerRequest(uploaded: uploaded, downloaded: downloaded, left: left, event: nil)
@@ -895,8 +947,15 @@ public actor TorrentDownload {
     }
 
     private func buildTrackerRequest(uploaded: Int, downloaded: Int, left: Int, event: String?) -> URLRequest {
+        if DEBUG {
+            print("Building HTTP request")
+        }
         let _event = event == nil ? "" : "&event=\(event!)"
         let _trackerID = trackerID == nil ? "" : "&trackerid=\(trackerID!)"
+        guard let port = port else {
+            fatalError("Port must never be nil when making HTTP requests")
+            //idk why swift tries to interpolate it as optional when i made it an implicitly unwrapped optional
+        }
         var req = URLRequest(url: .init(string: torrentFile.announce.absoluteString + "?info_hash=\(urlEncodedInfoHash)&peer_id=\(peerID)&port=\(port)&uploaded=\(uploaded)&downloaded=\(downloaded)&left=\(left)\(_event)\(_trackerID)")!)
         req.httpMethod = "GET"
         return req
@@ -918,6 +977,9 @@ public actor TorrentDownload {
     /// This function MUST ONLY be called with a socket that is actively connected to a peer and has both sent and received a handshake. This allows this to be used for both incoming and outgoing connections, and only handle the peer wire protocol commands
     /// - Parameter socket: <#socket description#>
     private nonisolated func addPeerSocket(_ socket: Socket) {
+        if DEBUG {
+            print("In peerSocket")
+        }
         peerQueue.async {
             var data = Data()
             let bytesRead = try! socket.read(into: &data, bytes: 4)
@@ -965,7 +1027,6 @@ public actor TorrentDownload {
                 socket.close()
                 break
             }
-//            switch messa
         }
     }
 }
