@@ -195,6 +195,10 @@ public actor TorrentDownload {
         var isComplete: Bool {
             arr.contains(false)
         }
+
+        var bitString: String {
+            arr.map { $0 ? "1" : "0"}.joined(separator: "")
+        }
     }
 
     private let torrentFile: TorrentFile
@@ -440,11 +444,15 @@ public actor TorrentDownload {
                 self.trackerID = trackerID
             }
 
-            guard let incomplete = dict["incomplete"] as? Int else {
-                fatalError()
+            if let incomplete = dict["incomplete"] as? Int {
+                print("Peers with incomplete file: \(incomplete)")
+            } else {
+                print("No incomplete key!")
             }
-            guard let complete = dict["complete"] as? Int else {
-                fatalError()
+            if let complete = dict["complete"] as? Int {
+                print("Peers with complete file: \(complete)")
+            } else {
+                print("No complete key!")
             }
 
             if DEBUG {
@@ -1188,6 +1196,7 @@ public actor TorrentDownload {
             }
         }
         var haves = self.shim._getHaves()
+        print("our haves, pre-writing: \(haves.bitString)")
         haves[pieceIdx] = true
         self.shim._setHaves(haves)
         if haves.isComplete {
@@ -1482,7 +1491,7 @@ public actor TorrentDownload {
                     case 5: //bitfield
                         let bitfield = Data(data[1...])
                         peerHaves = Haves(fromBitfield: bitfield, length: self.torrentFile.pieceCount)
-                        print("bitfield \(bitfield), with pieces \(peerHaves.arr.map { $0 ? "1" : "0"}.joined(separator: ""))")
+                        print("bitfield \(bitfield), with pieces \(peerHaves.bitString)")
                     case 6: //request
                         let idx = UInt32(bigEndian: data[1..<5].to(type: UInt32.self)!)
                         let begin = UInt32(bigEndian: data[5..<9].to(type: UInt32.self)!)
