@@ -1438,6 +1438,8 @@ public actor TorrentDownload {
                 var myCurrentWorkingPiece: UInt32? = nil
                 var myPieceData: PieceData? = nil
 
+                var flagged = false
+
                 try socket.write(from: localHavesCopy.makeMessage())
                 while self.shim.socketOperationsShouldContinue {
                     //Get message
@@ -1558,8 +1560,13 @@ public actor TorrentDownload {
                         print("invalid message")
                         print(data.first!)
                         dump(data)
-                        socket.close()
-                        throw NSError(domain: "com.gauck.sam.torrentkit", code: 0, userInfo: nil) //to break the loop
+                        print("discarding but continuing")
+                        if flagged {
+                            socket.close()
+                            throw NSError(domain: "com.gauck.sam.torrentkit", code: 0, userInfo: nil) //to break the loop
+                        } else {
+                            flagged = true
+                        }
                     }
 
                     //update variables (fetch from sync queue)
@@ -1648,8 +1655,10 @@ extension Socket {
         data = Data(bytesNoCopy: buf, count: bytes, deallocator: .custom({ ptr, count in
             ptr.deallocate()
         }))
-        if DEBUG {
-            print("Unable to read requested quantity of bytes: wanted \(bytes) but got \(bytesRead)")
+        if bytesRead != bytes {
+            if DEBUG {
+                print("Unable to read requested quantity of bytes: wanted \(bytes) but got \(bytesRead)")
+            }
         }
         return bytesRead
     }
