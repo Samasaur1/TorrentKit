@@ -1444,11 +1444,17 @@ public actor TorrentDownload {
                     var data = Data()
                     let bytesRead = try socket.read(into: &data, bytes: 4)
                     let messageLength = UInt32(bigEndian: data.to(type: UInt32.self)!)
+                    if DEBUG {
+                        print("Got a message length of \(messageLength) bytes")
+                    }
                     guard messageLength > 0 else {
                         //This message is a keep-alive; ignore it
                         continue
                     }
                     let moreBytesRead = try socket.read(into: &data, bytes: Int(messageLength))
+                    if DEBUG {
+                        print("Read an additional \(moreBytesRead) bytes")
+                    }
                     switch data.first! {
                     case 0: //choke
                         print("choke")
@@ -1501,6 +1507,9 @@ public actor TorrentDownload {
                         if outstandingRequests.remove(req) != nil {
                             if req.idx == myCurrentWorkingPiece {
                                 if myPieceData != nil {
+                                    if DEBUG {
+                                        print("Valid piece!")
+                                    }
                                     myPieceData!.receive(block, for: req)
                                 } else {
                                     if DEBUG {
@@ -1538,6 +1547,7 @@ public actor TorrentDownload {
                         print("port \(port)")
                     default: //invalid message
                         print("invalid message")
+                        print(data.first!)
                         dump(data)
                         socket.close()
                         throw NSError(domain: "com.gauck.sam.torrentkit", code: 0, userInfo: nil) //to break the loop
