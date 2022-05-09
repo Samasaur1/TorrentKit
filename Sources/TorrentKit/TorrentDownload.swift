@@ -32,21 +32,51 @@ public actor TorrentDownload {
         case off, beginning, running, stopping
     }
     private class AvoidActorIsolation {
-        private let shimQueue = DispatchQueue(label: "com.gauck.sam.torrentkit.shim.queue")
+        private let shimPeerQueue = DispatchQueue(label: "com.gauck.sam.torrentkit.shim.queue.peer")
+        private let shimHavesQueue = DispatchQueue(label: "com.gauck.sam.torrentkit.shim.queue.haves")
 
         var serverSocket: Socket!
         var shouldBeListening = false
 
         var socketOperationsShouldContinue = true
 
+        private var _haves = Haves.empty(ofLength: 0)
+        func _setHaves(_ haves: Haves) {
+            shimHavesQueue.sync {
+                _haves = haves
+            }
+        }
+        func getHaves(idx: UInt32) -> Bool {
+            shimHavesQueue.sync {
+                _haves[idx]
+            }
+        }
+        func setHaves(idx: UInt32, to newValue: Bool) {
+            shimHavesQueue.sync {
+                _haves[idx] = newValue
+            }
+        }
+//        var haves: Haves {
+//            get {
+//                shimHavesQueue.sync {
+//                    _haves
+//                }
+//            }
+//            set {
+//                shimHavesQueue.sync {
+//                    _haves = newValue
+//                }
+//            }
+//        }
+
         private var _peers: [PeerData] = []
         func newPeers(_ peers: [PeerData]) {
-            shimQueue.sync {
+            shimPeerQueue.sync {
                 self._peers.append(contentsOf: peers)
             }
         }
         func nextPeerForConnection() -> PeerData? {
-            return shimQueue.sync {
+            return shimPeerQueue.sync {
                 guard self.connectedPeers < 3 else {
                     return nil
                 }
@@ -59,7 +89,7 @@ public actor TorrentDownload {
         }
         private var connectedPeers: Int = 0
         func failedToConnectToPeer() {
-            shimQueue.sync {
+            shimPeerQueue.sync {
                 self.connectedPeers -= 1
             }
         }
@@ -69,7 +99,7 @@ public actor TorrentDownload {
 //            }
 //        }
         func __connectedToPeer() {
-            shimQueue.sync {
+            shimPeerQueue.sync {
                 self.connectedPeers += 1
             }
         }
@@ -90,12 +120,23 @@ public actor TorrentDownload {
             }
             self.length = length
         }
+        static func empty(ofLength length: Int) -> Haves {
+            return Haves(fromBitfield: Data(repeating: 0, count: (length/8)+1), length: length)
+        }
         subscript(index: Int) -> Bool {
             get {
                 arr[index]
             }
             set {
                 arr[index] = newValue
+            }
+        }
+        subscript(index: UInt32) -> Bool {
+            get {
+                self[Int(index)]
+            }
+            set {
+                self[Int(index)] = newValue
             }
         }
     }
@@ -195,6 +236,7 @@ public actor TorrentDownload {
                 //equivalent to String(byte, radix: 16, uppercase: true) but with padding
             }
         }.joined(separator: "")
+        self.shim._setHaves(Haves.empty(ofLength: torrentFile.pieceCount))
         state = .off
     }
 
@@ -367,6 +409,7 @@ public actor TorrentDownload {
                     if DEBUG {
                         print("Attempting to form connection to new peer")
                     }
+                    //TODO: change queues
                     //here we should move to peerQueue, because as it stands we only connect one at a time
                     do {
                         let s = try Socket.create()
@@ -1076,13 +1119,24 @@ public actor TorrentDownload {
         return req
     }
 
-    private func output(_ data: Data, atOffset offset: UInt64) {
+    private nonisolated func write(_ data: Data, atOffset offset: UInt64) {
         writingQueue.async { //I feel like `.async` should be fine, because only one `async` block can run at a time, but better safe than sorry //If there is a problem, make this `.sync`
             do {
                 try self.handle.seek(toOffset: offset)
                 try self.handle.write(contentsOf: data)
             } catch {
                 print("unable to write!")
+            }
+        }
+    }
+    private nonisolated func read(fromPiece pieceIdx: UInt32, beginningAt byteOffset: UInt32, length: UInt32) -> Data {
+        let offset = (pieceIdx * UInt32(self.torrentFile.pieceLength)) + byteOffset
+        return writingQueue.sync {
+            do {
+                try self.handle.seek(toOffset: UInt64(offset))
+                return try self.handle.read(upToCount: Int(length))!
+            } catch {
+                fatalError("Unable to read requested data")
             }
         }
     }
@@ -1097,6 +1151,11 @@ public actor TorrentDownload {
         }
         peerQueue.async {
             do {
+                var amChoking = true
+                var amInterested = false
+                var peerChoking = true
+                var peerInterested = false
+                var peerHaves = Haves.empty(ofLength: self.torrentFile.pieceCount)
                 while self.shim.socketOperationsShouldContinue {
                     var data = Data()
                     let bytesRead = try socket.read(into: &data, bytes: 4)
@@ -1109,14 +1168,19 @@ public actor TorrentDownload {
                     switch data.first! {
                     case 0: //choke
                         print("choke")
+                        peerChoking = true
                     case 1: //unchoke
                         print("unchoke")
+                        peerChoking = false
                     case 2: //interested
                         print("interested")
+                        peerInterested = true
                     case 3: //not interested
                         print("not interested")
+                        peerInterested = false
                     case 4: //have
                         let idx = UInt32(bigEndian: data[1...].to(type: UInt32.self)!)
+                        peerHaves[idx] = true
                         print("have \(idx)")
                     case 5: //bitfield
                         let bitfield = Data(data[1...])
@@ -1127,6 +1191,13 @@ public actor TorrentDownload {
                         let begin = UInt32(bigEndian: data[5..<9].to(type: UInt32.self)!)
                         let length = UInt32(bigEndian: data[9...].to(type: UInt32.self)!)
                         print("request \(idx) \(begin) \(length)")
+
+                        let block = self.read(fromPiece: idx, beginningAt: begin, length: length)
+                        let output = Data(from: UInt32(9 + messageLength).bigEndian) + [7] + data[1..<9] + block
+                        try socket.write(from: output)
+                        if DEBUG {
+                            print("Wrote block of length \(length) in piece \(idx) at offset \(begin)")
+                        }
                     case 7: //piece
                         let idx = UInt32(bigEndian: data[1..<5].to(type: UInt32.self)!)
                         let begin = UInt32(bigEndian: data[5..<9].to(type: UInt32.self)!)
@@ -1175,100 +1246,3 @@ extension Data {
         return value
     }
 }
-//
-//if let sfm = tf.singleFileMode {
-//    print("sfm")
-//    let length = sfm.length
-//    var ur = tf.announce.absoluteString
-//    ur += "?info_hash=\(infoHash)&peer_id=\(peerID)&port=6881&uploaded=0&downloaded=0&left=\(length)&event="
-//    let url = URL(string: ur + "started")!
-//    let url2 = URL(string: ur + "stopped")!
-//    var req = URLRequest(url: url)
-//    req.httpMethod = "GET"
-//    var req2 = URLRequest(url: url2)
-//    req2.httpMethod = "GET"
-//    var waiting = true
-//    let task = URLSession.shared.dataTask(with: req) { data, response, error in
-//        waiting = false
-//        print("r")
-//        dump(data)
-//        dump(response)
-//        dump(error)
-//        try! data!.write(to: .init(fileURLWithPath: "/tmp/data.dat"))
-//        dump(try! Bencoding.object(from: data!))
-//    }
-//    task.resume()
-//
-//    while waiting {}
-//    let task2 = URLSession.shared.dataTask(with: req2) { data2, response2, error2 in
-//        print("r2")
-//        dump(data2)
-//        dump(response2)
-//        dump(error2)
-//        dump(try! Bencoding.object(from: data2!))
-//    }
-//    task2.resume()
-//    while true {}
-//} else if let mfm = tf.multipleFileMode {
-//    print("mfm")
-//    print(tf.infoHash)
-//    print(tf.announce)
-//    let total_length = mfm.files.map { $0.length }.reduce(0, +)
-//    var u = URLComponents(url: tf.announce, resolvingAgainstBaseURL: false)!
-//    let ih = tf.infoHash.hexStringEncoded()
-//    //let in_ha = String(ih[..<ih.index(ih.startIndex, offsetBy: 20)])
-//    let in_ha = String(bytes: tf.infoHash[..<20], encoding: .ascii)!
-//    //let in_ha = String(bytes: ih, encoding: .utf8)
-//    //let in_ha = ih
-//    print(in_ha)
-//    let peer_id = in_ha
-//    u.queryItems = [
-//        URLQueryItem(name: "info_hash", value: in_ha),
-//        URLQueryItem(name: "peer_id", value: peer_id),
-//        URLQueryItem(name: "port", value: "6881"),
-//        URLQueryItem(name: "uploaded", value: "0"),
-//        URLQueryItem(name: "downloaded", value: "0"),
-//        URLQueryItem(name: "left", value: "\(total_length)"),
-//        URLQueryItem(name: "event", value: "started")
-//    ]
-//    u.percentEncodedQuery = u.percentEncodedQuery?.replacingOccurrences(of: "+", with: "%2B")
-//    var u2 = URLComponents(url: tf.announce, resolvingAgainstBaseURL: false)!
-//    u2.queryItems = [
-//        URLQueryItem(name: "info_hash", value: in_ha),
-//        URLQueryItem(name: "peer_id", value: peer_id),
-//        URLQueryItem(name: "port", value: "6881"),
-//        URLQueryItem(name: "uploaded", value: "0"),
-//        URLQueryItem(name: "downloaded", value: "0"),
-//        URLQueryItem(name: "left", value: "\(total_length)"),
-//        URLQueryItem(name: "event", value: "stopped")
-//    ]
-//    u2.percentEncodedQuery = u.percentEncodedQuery?.replacingOccurrences(of: "+", with: "%2B")
-//    var req = URLRequest(url: u.url!)
-//    req.httpMethod = "GET"
-//    var req2 = URLRequest(url: u2.url!)
-//    req2.httpMethod = "GET"
-//    var waiting = true
-//    let task = URLSession.shared.dataTask(with: req) { data, response, error in
-//        waiting = false
-//        print("r")
-//        dump(data)
-//        dump(response)
-//        dump(error)
-//        try! data!.write(to: .init(fileURLWithPath: "/tmp/data.dat"))
-//        dump(try! Bencoding.object(from: data!))
-//    }
-//    task.resume()
-//
-//    while waiting {}
-//    let task2 = URLSession.shared.dataTask(with: req2) { data2, response2, error2 in
-//        print("r2")
-//        dump(data2)
-//        dump(response2)
-//        dump(error2)
-//        dump(try! Bencoding.object(from: data2!))
-//    }
-//    task2.resume()
-//    while true {}
-//} else {
-//    fatalError("neither single noor multiple file")
-//}
