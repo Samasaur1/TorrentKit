@@ -1105,6 +1105,7 @@ public actor TorrentDownload {
             }
 
             state = .off
+            print("Final stats:\tuploaded=\(uploaded), downloaded=\(downloaded)")
             /* Here is an example response to a 'stopped' message
 
              ▿ 4 key/value pairs
