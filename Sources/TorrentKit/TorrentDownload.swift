@@ -93,7 +93,11 @@ public actor TorrentDownload {
                 return _peers.removeFirst()
             }
         }
-        private var connectedPeers: Int = 0
+        private var connectedPeers: Int = 0 {
+            didSet {
+                logger.log("Now at \(connectedPeers) connected peers", type: .peerSocket)
+            }
+        }
         func failedToConnectToPeer() {
             shimPeerQueue.sync {
                 self.connectedPeers -= 1
