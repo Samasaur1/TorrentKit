@@ -14,6 +14,7 @@ import CryptoKit
 public var DEBUG = true
 public var SOCKETEE = false
 public var MAX_PEER_CONNECTIONS = 30
+public var logger = Logger([.stateChanges, .peerSocket])
 
 public actor TorrentDownload {
     private struct PeerData {
@@ -22,9 +23,7 @@ public actor TorrentDownload {
         let peerID: Data
 
         init(from dict: [String: Any]) {
-            if DEBUG {
-                print("initting peerdata with dict \(dict)")
-            }
+            logger.log("initting peerdata with dict \(dict)", type: .peerDataParsing)
             ip = dict["ip"] as! String
             port = Int32(dict["port"] as! Int)
             peerID = (dict["peer id"] as! String).hashify()
@@ -223,9 +222,7 @@ public actor TorrentDownload {
     private var trackerTask: Task<Void, Error>? = nil
     public private(set) var state: Status {
         didSet {
-            if DEBUG {
-                print("state went from \(oldValue) to \(state)")
-            }
+            logger.log("state went from \(oldValue) to \(state)", type: .stateChanges)
         }
     }
     private let peerQueue = DispatchQueue(label: "com.gauck.sam.torrentkit.queue.peer", attributes: .concurrent)
@@ -316,8 +313,6 @@ public actor TorrentDownload {
         }.joined(separator: "")
         state = .off
 
-        print("piece length: \(torrentFile.pieceLength)")
-
         func createOutputFileHandle() throws -> (FileHandle, Haves) {
             var haves = Haves.empty(ofLength: torrentFile.pieceCount)
             let path = URL(fileURLWithPath: "/tmp/\(torrentFile.singleFileMode!.name)")
@@ -346,6 +341,7 @@ public actor TorrentDownload {
             fatalError()
         }
         self.completed = haves.isComplete
+        print("Recovered \(haves.percentComplete, stringFormat: "%.2f")% of torrent download")
         self.handle = handle
         self.shim._setHaves(haves)
     }
@@ -393,9 +389,7 @@ public actor TorrentDownload {
                 do {
                     try serverSocket.listen(on: _port)
                     self.port = Int32(_port)
-                    if DEBUG {
-                        print("listening socket bound to port \(_port)")
-                    }
+                    logger.log("listening socket bound to port \(_port)", type: .listeningSocket)
                     break listener
                 } catch {
                     if _port == 6889 {
@@ -409,13 +403,9 @@ public actor TorrentDownload {
         listenQueue.async {
             while self.shim.shouldBeListening {
                 do {
-                    if DEBUG {
-                        print("Waiting for incoming connection to socket")
-                    }
+                    logger.log("Waiting for incoming connection to socket", type: .listeningSocket)
                     let s = try self.shim.serverSocket.acceptClientConnection()
-                    if DEBUG {
-                        print("Got incoming connection to socket from \(s.remoteHostname):\(s.remotePort)")
-                    }
+                    logger.log("Got incoming connection to socket from \(s.remoteHostname):\(s.remotePort)", type: .listeningSocket)
                     let handshake_buf = UnsafeMutablePointer<CChar>.allocate(capacity: 68)
                     defer {
                         handshake_buf.deallocate()
@@ -424,16 +414,12 @@ public actor TorrentDownload {
                     let _ = try s.read(into: &data, bytes: 68)
                     let _infoHash = data[28..<48]
                     guard _infoHash == self.torrentFile.infoHash else {
-                        if DEBUG {
-                            print("Incoming connection had infoHash \(_infoHash.hexStringEncoded()) but this download has infoHash \(self.torrentFile.infoHash.hexStringEncoded()); closing socket")
-                        }
+                        logger.log("Incoming connection had infoHash \(_infoHash.hexStringEncoded()) but this download has infoHash \(self.torrentFile.infoHash.hexStringEncoded()); closing socket", type: .listeningSocket)
                         s.close()
                         return
                     }
                     let _peerID = data[48...]
-                    if DEBUG {
-                        print("Got peer ID \(_peerID.hexStringEncoded())")
-                    }
+                    logger.log("Got peer ID \(_peerID.hexStringEncoded())", type: .listeningSocket)
                     try s.write(from: self.handshake)
                     self.shim.__connectedToPeer()
                     self.addPeerSocket(s)
@@ -443,9 +429,7 @@ public actor TorrentDownload {
         Task {
             let req = buildTrackerRequest(uploaded: 0, downloaded: 0, left: self.length, event: "started")
 
-            if DEBUG {
-                print("Making initial URLRequest")
-            }
+            logger.log("Making initial URLRequest", type: .trackerRequests)
             let (data, response) = try await URLSession.shared.data(for: req)
 
             guard let response = response as? HTTPURLResponse else {
@@ -473,21 +457,13 @@ public actor TorrentDownload {
             }
             self.interval = interval
 
-            if DEBUG {
-                print("Starting intermittent tracker task")
-            }
+            logger.log("Starting intermittent tracker task", type: .trackerRequests)
             trackerTask = Task {
-                if DEBUG {
-                    print("Intermittent tracker task has begun!")
-                }
+                logger.log("Intermittent tracker task has begun!", type: .trackerRequests)
                 while true {
-                    if DEBUG {
-                        print("Tracker task will wait")
-                    }
+                    logger.log("Tracker task will wait", type: .trackerRequests)
                     try await Task.sleep(nanoseconds: UInt64(self.interval) * NSEC_PER_SEC)
-                    if DEBUG {
-                        print("Tracker task will ping")
-                    }
+                    logger.log("Tracker task will ping", type: .trackerRequests)
                     try await regularTrackerPing()
                 }
             }
@@ -507,46 +483,32 @@ public actor TorrentDownload {
                 print("No complete key!")
             }
 
-            if DEBUG {
-                print("Attempting to convert peers dict")
-            }
+            logger.log("Attempting to convert peers dict", type: .peerDataParsing)
             guard let peersDict = dict["peers"] as? [[String: Any]] else {
                 fatalError("No peers!")
             }
             let peers = peersDict.map(PeerData.init(from:))
             self.peers = peers
-            if DEBUG {
-                print("Got peers!")
-            }
+            logger.log("Got peers!", type: .peerDataParsing)
 
             peerManagementQueue.async {
                 while self.shim.socketOperationsShouldContinue {
                     guard let peer = self.shim.nextPeerForConnection() else {
                         continue
                     }
-                    if DEBUG {
-                        print("Attempting to form connection to new peer")
-                    }
+                    logger.log("Attempting to form connection to new peer", type: .outgoingSocketConnections)
                     //TODO: change queues
                     //here we should move to peerQueue, because as it stands we only connect one at a time
                     do {
                         let s = try Socket.create()
-                        if DEBUG {
-                            print("Connecting to peer \(peer.peerID.hexStringEncoded()) at \(peer.ip):\(peer.port)")
-                        }
+                        logger.log("Connecting to peer \(peer.peerID.hexStringEncoded()) at \(peer.ip):\(peer.port)", type: .outgoingSocketConnections)
                         try s.connect(to: peer.ip, port: peer.port)
-                        if DEBUG {
-                            print("Connected to peer \(peer.peerID.hexStringEncoded()) at \(peer.ip):\(peer.port)")
-                        }
+                        logger.log("Connected to peer \(peer.peerID.hexStringEncoded()) at \(peer.ip):\(peer.port)", type: .outgoingSocketConnections)
                         try s.write(from: self.handshake)
-                        if DEBUG {
-                            print("Wrote handshake to peer \(peer.peerID.hexStringEncoded()) at \(peer.ip):\(peer.port)")
-                        }
+                        logger.log("Wrote handshake to peer \(peer.peerID.hexStringEncoded()) at \(peer.ip):\(peer.port)", type: .outgoingSocketConnections)
                         var buf = Data()
                         let bytesRead = try s.read(into: &buf, bytes: 68)
-                        if DEBUG {
-                            print("Read handshake from peer \(peer.peerID.hexStringEncoded()) at \(peer.ip):\(peer.port)")
-                        }
+                        logger.log("Read handshake from peer \(peer.peerID.hexStringEncoded()) at \(peer.ip):\(peer.port)", type: .outgoingSocketConnections)
                         //if the remote connection closes, might throw in above line, `bytesRead` might be 0, or might fail the below check
                         guard !s.remoteConnectionClosed else {
                             throw NSError(domain: "com.gauck.sam.torrentkit", code: 0, userInfo: nil) //the error doesn't matter because it gets caught immediately and ignored
@@ -556,25 +518,19 @@ public actor TorrentDownload {
                         }
                         let _infoHash = buf[28..<48]
                         guard _infoHash == self.torrentFile.infoHash else {
-                            if DEBUG {
-                                print("Peer \(peer.peerID.hexStringEncoded()) had infoHash \(_infoHash.hexStringEncoded()) but this download has infoHash \(self.torrentFile.infoHash.hexStringEncoded()); closing socket")
-                            }
+                            logger.log("Peer \(peer.peerID.hexStringEncoded()) had infoHash \(_infoHash.hexStringEncoded()) but this download has infoHash \(self.torrentFile.infoHash.hexStringEncoded()); closing socket", type: .outgoingSocketConnections)
                             s.close() //should never happen because the peer would just close the connection
                             throw NSError(domain: "com.gauck.sam.torrentkit", code: 0, userInfo: nil)
                         }
                         let _peerID = buf[48...]
                         guard peer.peerID == _peerID else {
-                            if DEBUG {
-                                print("Peer \(peer.peerID.hexStringEncoded()) somehow changed to peerID \(_peerID.hexStringEncoded())")
-                            }
+                            logger.log("Peer \(peer.peerID.hexStringEncoded()) somehow changed to peerID \(_peerID.hexStringEncoded())", type: .outgoingSocketConnections)
                             s.close()
                             throw NSError(domain: "com.gauck.sam.torrentkit", code: 0, userInfo: nil)
                         }
                         self.addPeerSocket(s)
                     } catch {
-                        if DEBUG {
-                            print("Caught an error while trying to connect to peer \(peer.peerID.hexStringEncoded()) (most likely custom error); ignoring (continues to next peer)")
-                        }
+                        logger.log("Caught an error while trying to connect to peer \(peer.peerID.hexStringEncoded()) (most likely custom error); ignoring (continues to next peer)", type: .outgoingSocketConnections)
                         self.shim.failedToConnectToPeer()
                     }
                 }
@@ -1113,9 +1069,7 @@ public actor TorrentDownload {
 //        Task {
             let req = buildTrackerRequest(uploaded: self.uploaded, downloaded: self.downloaded, left: self.length - self.downloaded, event: "stopped")
 
-            if DEBUG {
-                print("Making stop HTTP request")
-            }
+            logger.log("Making stop HTTP request", type: .trackerRequests)
             let (data, response) = try await URLSession.shared.data(for: req)
 
             guard let response = response as? HTTPURLResponse else {
@@ -1165,9 +1119,7 @@ public actor TorrentDownload {
     }
 
     private func regularTrackerPing() async throws {
-        if DEBUG {
-            print("regularTrackerPing")
-        }
+        logger.log("regularTrackerPing", type: .trackerRequests)
         let downloaded = self.downloaded
         let left = self.length - downloaded
         let req = buildTrackerRequest(uploaded: uploaded, downloaded: downloaded, left: left, event: nil)
@@ -1224,9 +1176,7 @@ public actor TorrentDownload {
     }
 
     private func buildTrackerRequest(uploaded: Int, downloaded: Int, left: Int, event: String?) -> URLRequest {
-        if DEBUG {
-            print("Building HTTP request")
-        }
+        logger.log("Building HTTP request", type: .trackerRequests)
         let _event = event == nil ? "" : "&event=\(event!)"
         let _trackerID = trackerID == nil ? "" : "&trackerid=\(trackerID!)"
         guard let port = port else {
@@ -1254,6 +1204,7 @@ public actor TorrentDownload {
         var haves = self.shim._getHaves()
         haves[pieceIdx] = true
         print("Piece \(pieceIdx) written; now \(haves.percentComplete, stringFormat: "%.2f")% complete")
+        logger.log("Our bitfield is now \(haves.bitString)", type: .bitfields)
         self.shim._setHaves(haves)
         if haves.isComplete {
             print("Allegedly complete")
@@ -1458,23 +1409,17 @@ public actor TorrentDownload {
                 return false
             }
             let seg = writtenSegments[0]
-            if DEBUG {
-                print("Piece \(idx) is\(seg.offset == 0 && seg.length == size ? "" : " not") complete")
-            }
+            logger.log("Piece \(idx) is\(seg.offset == 0 && seg.length == size ? "" : " not") complete", type: .verifyingPieces)
             return seg.offset == 0 && seg.length == size
         }
 
         func verify() -> Data? {
-            if DEBUG {
-                print("Attempting to verify piece \(idx)")
-            }
+            logger.log("Attempting to verify piece \(idx)", type: .verifyingPieces)
             guard isComplete else {
                 return nil
             }
             let hash = Data(Insecure.SHA1.hash(data: writtenSegments[0].data))
-            if DEBUG {
-                print("Piece \(idx) is\(hash == infoHash ? "" : " not") verified")
-            }
+            logger.log("Piece \(idx) is\(hash == infoHash ? "" : " not") verified", type: .verifyingPieces)
             if hash == infoHash {
                 return writtenSegments[0].data
             }
@@ -1487,9 +1432,7 @@ public actor TorrentDownload {
     /// This function MUST ONLY be called with a socket that is actively connected to a peer and has both sent and received a handshake. This allows this to be used for both incoming and outgoing connections, and only handle the peer wire protocol commands
     /// - Parameter socket: <#socket description#>
     private nonisolated func addPeerSocket(_ socket: Socket) {
-        if DEBUG {
-            print("In peerSocket")
-        }
+        logger.log("In peerSocket", type: .peerSocket)
         peerQueue.async {
             do {
                 var amChoking = true
@@ -1508,55 +1451,54 @@ public actor TorrentDownload {
                     //Get message
                     var data = Data()
                     let bytesRead = try socket.read(into: &data, bytes: 4)
-                    if bytesRead != 4 {
-                        if DEBUG {
-                            print("Unable to read 4 bytes to determine message size!")
-                        }
-                    }
+//                    if bytesRead != 4 {
+//                        if DEBUG {
+//                            print("Unable to read 4 bytes to determine message size!")
+//                        }
+//                    }
                     let messageLength = UInt32(bigEndian: data.to(type: UInt32.self)!)
                     guard messageLength > 0 else {
                         //This message is a keep-alive; ignore it
                         continue
                     }
-                    if DEBUG {
-                        print("Got a message length of \(messageLength) bytes")
-                    }
+//                    if DEBUG {
+//                        print("Got a message length of \(messageLength) bytes")
+//                    }
                     let moreBytesRead = try socket.read(into: &data, bytes: Int(messageLength))
-                    if DEBUG {
-                        print("Read an additional \(moreBytesRead) bytes")
-                    }
+//                    if DEBUG {
+//                        print("Read an additional \(moreBytesRead) bytes")
+//                    }
                     switch data.first! {
                     case 0: //choke
-                        print("choke")
+                        logger.log("Peer choked us", type: .peerSocketDetailed)
                         peerChoking = true
                     case 1: //unchoke
-                        print("unchoke")
+                        logger.log("Peer unchoked us", type: .peerSocketDetailed)
                         peerChoking = false
                     case 2: //interested
-                        print("interested")
+                        logger.log("Peer is interested in us", type: .peerSocketDetailed)
                         peerInterested = true
                     case 3: //not interested
-                        print("not interested")
+                        logger.log("Pees is not interested in us", type: .peerSocketDetailed)
                         peerInterested = false
                     case 4: //have
                         let idx = UInt32(bigEndian: data[1...].to(type: UInt32.self)!)
                         peerHaves[idx] = true
-                        print("have \(idx)")
+                        logger.log("Peer has piece \(idx)", type: .peerSocketDetailed)
                     case 5: //bitfield
                         let bitfield = Data(data[1...])
                         peerHaves = Haves(fromBitfield: bitfield, length: self.torrentFile.pieceCount)
-                        print("bitfield \(bitfield), \(peerHaves.percentComplete)% of file with pieces \(peerHaves.bitString)")
+                        logger.log("Peer has \(peerHaves.percentComplete, stringFormat: "%.2f")% of the file (from bitfield)", type: .peerSocketDetailed)
+                        logger.log("Peer bitfield is \(peerHaves.bitString)", type: .bitfields)
                     case 6: //request
                         let idx = UInt32(bigEndian: data[1..<5].to(type: UInt32.self)!)
                         let begin = UInt32(bigEndian: data[5..<9].to(type: UInt32.self)!)
                         let length = UInt32(bigEndian: data[9...].to(type: UInt32.self)!)
                         let req = PieceRequest(idx: idx, begin: begin, length: length)
-                        print("request \(idx) \(begin) \(length)")
+                        logger.log("Peer requested chunk of length \(length) at offset \(begin) in piece \(idx)", type: .peerSocketDetailed)
 
                         if canceledRequests.contains(req) {
-                            if DEBUG {
-                                print("Request had already been canceled")
-                            }
+                            logger.log("Request had already been canceled", type: .peerSocketDetailed)
                             canceledRequests.remove(req)
                             continue
                         }
@@ -1564,9 +1506,7 @@ public actor TorrentDownload {
                         let block = self.read(fromPiece: idx, beginningAt: begin, length: length)
                         let output = Data(from: UInt32(9 + messageLength).bigEndian) + [7] + data[1..<9] + block
                         try socket.write(from: output)
-                        if DEBUG {
-                            print("Uploaded block of length \(length) in piece \(idx) at offset \(begin) to peer")
-                        }
+                        logger.log("Uploaded block of length \(length) at offset \(begin) in piece \(idx) to peer", type: .peerSocketDetailed)
                         Task {
                             await self.reportUploaded(bytes: length)
                         }
@@ -1574,34 +1514,23 @@ public actor TorrentDownload {
                         let idx = UInt32(bigEndian: data[1..<5].to(type: UInt32.self)!)
                         let begin = UInt32(bigEndian: data[5..<9].to(type: UInt32.self)!)
                         let block = Data(data[9...])
-                        print("piece \(idx) \(begin) \(block)")
                         let req = PieceRequest(idx: idx, begin: begin, length: messageLength - 9)
 
-                        if DEBUG {
-                            print("received response to request for \(req.length) bytes of piece \(req.idx) starting at \(req.begin)")
-                        }
+                        logger.log("Received response to request for \(req.length) bytes of piece \(req.idx) starting at \(req.begin)", type: .peerSocketDetailed)
 
                         if outstandingRequests.remove(req) != nil {
                             if req.idx == myCurrentWorkingPiece {
                                 if myPieceData != nil {
-                                    if DEBUG {
-                                        print("Valid piece!")
-                                    }
+                                    logger.log("Valid piece!", type: .peerSocketDetailed)
                                     myPieceData!.receive(block, for: req)
                                 } else {
-                                    if DEBUG {
-                                        print("Cannot find piece data; ignoring piece")
-                                    }
+                                    logger.log("Cannot find piece data; ignoring piece", type: .peerSocketDetailed)
                                 }
                             } else {
-                                if DEBUG {
-                                    print("Received block for incorrect piece; ignoring")
-                                }
+                                logger.log("Received block for incorrect piece; ignoring", type: .peerSocketDetailed)
                             }
                         } else {
-                            if DEBUG {
-                                print("Unexpected request; ignoring")
-                            }
+                            logger.log("Unexpected request; ignoring", type: .peerSocketDetailed)
                         }
 
 //                        if DEBUG {
@@ -1616,14 +1545,14 @@ public actor TorrentDownload {
                         let begin = UInt32(bigEndian: data[5..<9].to(type: UInt32.self)!)
                         let length = UInt32(bigEndian: data[9...].to(type: UInt32.self)!)
                         let req = PieceRequest(idx: idx, begin: begin, length: length)
-                        print("cancel \(idx) \(begin) \(length)")
+                        logger.log("Peer canceled request for chunk of length \(length) at offset \(begin) in piece \(idx)", type: .peerSocketDetailed)
 
                         canceledRequests.insert(req)
                     case 9: //port
                         let port = UInt16(bigEndian: data[1...].to(type: UInt16.self)!)
-                        print("port \(port)")
+                        logger.log("Unsupported (by me) message: port \(port)", type: .peerSocketDetailed)
                     default: //invalid message
-                        print("invalid message")
+                        logger.log("Peer sent invalid message", type: .peerSocket)
                         //I'm fairly certain previous invalid message errors I was getting were due to not reading all the bytes I wanted from a previous read call. I have changed my extension to Socket to make it wait until it has the requested amount of bytes, which appears to have fixed the problem
                         socket.close()
                         throw NSError(domain: "com.gauck.sam.torrentkit", code: 0, userInfo: nil) //to break the loop
@@ -1640,11 +1569,16 @@ public actor TorrentDownload {
                         //  "When a peer chokes the client, it is a notification that no requests will be answered until the client is unchoked. The client should not attempt to send requests for blocks, and it should consider all pending (unanswered) requests to be discarded by the remote peer."
                         outstandingRequests = []
                     }
+                    if let idx = myCurrentWorkingPiece {
+                        if localHavesCopy[idx] {
+                            logger.log("Another socket finished this piece", type: .peerSocket)
+                            myCurrentWorkingPiece = nil
+                            myPieceData = nil
+                        }
+                    }
                     if true == myPieceData?.isComplete {
                         if let data = myPieceData?.verify() {
-                            if DEBUG {
-                                print("Socket completed piece \(myPieceData!.idx)")
-                            }
+                            logger.log("Socket completed piece \(myPieceData!.idx)", type: .peerSocket)
                             self.write(data, inPiece: myPieceData!.idx, beginningAt: 0)
                             myCurrentWorkingPiece = nil
                         }
@@ -1660,9 +1594,7 @@ public actor TorrentDownload {
                             //TODO: stay connected to sockets who don't have anything
                         }
                         myCurrentWorkingPiece = UInt32(el.offset)
-                        if DEBUG {
-                            print("Socket has decided to work on piece \(el.offset)")
-                        }
+                        logger.log("Socket has decided to work on piece \(el.offset)", type: .peerSocket)
                         if myCurrentWorkingPiece! == self.torrentFile.pieceCount - 1 {
                             myPieceData = .init(idx: myCurrentWorkingPiece!, size: UInt32(self.length % self.torrentFile.pieceLength), infoHash: self.torrentFile.pieces[Int(myCurrentWorkingPiece!)])
                         } else {
@@ -1676,9 +1608,7 @@ public actor TorrentDownload {
 //                    }
                     var message = Data()
                     for newPiece in newPieces {//haves
-                        if DEBUG {
-                            print("Informing peer that we have piece \(newPiece)")
-                        }
+                        logger.log("Informing peer that we have piece \(newPiece)", type: .peerSocketDetailed)
                         message += Data(from: UInt32(5).bigEndian) + [4] + Data(from: newPiece.bigEndian)
                     }
                     if !peerChoking {
@@ -1689,9 +1619,7 @@ public actor TorrentDownload {
                             }
                                 message += req.makeMessage()
                                 outstandingRequests.insert(req)
-                            if DEBUG {
-                                print("queueing request for \(req.length) bytes of piece \(req.idx) starting at \(req.begin)")
-                            }
+                            logger.log("queueing request for \(req.length) bytes of piece \(req.idx) starting at \(req.begin)", type: .peerSocketDetailed)
                                 if outstandingRequests.count == 5 {
                                     break newRequestsLoop
                                 }
@@ -1729,11 +1657,11 @@ extension Socket {
         data = Data(bytesNoCopy: buf, count: bytes, deallocator: .custom({ ptr, count in
             ptr.deallocate()
         }))
-        if totalBytesRead != bytes {
-            if DEBUG {
-                print("Unable to read requested quantity of bytes: wanted \(bytes) but got \(totalBytesRead)")
-            }
-        }
+//        if totalBytesRead != bytes {
+//            if DEBUG {
+//                print("Unable to read requested quantity of bytes: wanted \(bytes) but got \(totalBytesRead)")
+//            }
+//        }
         return totalBytesRead
     }
 }
