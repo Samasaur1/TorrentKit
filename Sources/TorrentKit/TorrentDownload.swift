@@ -275,6 +275,13 @@ public actor TorrentDownload {
     private var downloaded: Int = 0
     private var uploaded: Int = 0
 
+    private func reportDownloaded(bytes: Int) {
+        self.downloaded += bytes
+    }
+    private func reportUploaded(bytes: UInt32) {
+        self.uploaded += Int(bytes)
+    }
+
     public private(set) var completed: Bool
 
     public init(pathToTorrentFile url: URL) {
@@ -319,7 +326,10 @@ public actor TorrentDownload {
                 try handle.seek(toOffset: 0)
                 let length = torrentFile.pieceLength
                 for i in 0..<torrentFile.pieceCount {
-                    let data = try handle.read(upToCount: length)! //if less than length bytes are available, read to the end of the file
+                    //if less than length bytes are available, read to the end of the file
+                    guard let data = try handle.read(upToCount: length) else {
+                        return (handle, haves)
+                    }
                     let hash = Data(Insecure.SHA1.hash(data: data))
                     if hash == torrentFile.pieces[i] {
                         haves[i] = true
@@ -1104,7 +1114,7 @@ public actor TorrentDownload {
 
         return Task {
 //        Task {
-            let req = buildTrackerRequest(uploaded: 0, downloaded: 0, left: 0, event: "stopped")
+            let req = buildTrackerRequest(uploaded: self.uploaded, downloaded: self.downloaded, left: self.length - self.downloaded, event: "stopped")
 
             if DEBUG {
                 print("Making stop HTTP request")
@@ -1240,6 +1250,9 @@ public actor TorrentDownload {
             } catch {
                 print("unable to write!")
             }
+        }
+        Task {
+            await self.reportDownloaded(bytes: data.count)
         }
         var haves = self.shim._getHaves()
         haves[pieceIdx] = true
@@ -1556,6 +1569,9 @@ public actor TorrentDownload {
                         try socket.write(from: output)
                         if DEBUG {
                             print("Uploaded block of length \(length) in piece \(idx) at offset \(begin) to peer")
+                        }
+                        Task {
+                            await self.reportUploaded(bytes: length)
                         }
                     case 7: //piece
                         let idx = UInt32(bigEndian: data[1..<5].to(type: UInt32.self)!)
