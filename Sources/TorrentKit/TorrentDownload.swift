@@ -438,119 +438,131 @@ public actor TorrentDownload {
             let req = buildTrackerRequest(uploaded: 0, downloaded: 0, left: self.length, event: "started")
 
             logger.log("Making initial URLRequest", type: .trackerRequests)
-            let (data, response) = try await URLSession.shared.data(for: req)
+            var attempt = 0
+            while attempt < 5 {
+                do {
+                    let (data, response) = try await URLSession.shared.data(for: req)
 
-            guard let response = response as? HTTPURLResponse else {
-                fatalError("Starting request had invalid response")
-            }
-            guard response.statusCode == 200 else {
-                try? data.write(to: .init(fileURLWithPath: "/tmp/debug.dat"))
-                dump(data)
-                dump(response)
-                fatalError("Starting request had valid response with non-OK error code")
-            }
-
-            guard let obj = try? Bencoding.object(from: data), let dict = obj as? [String: Any] else {
-                try! data.write(to: .init(fileURLWithPath: "/tmp/start.dat"))
-                fatalError("/tmp/start.dat")
-            }
-
-            if let reason = dict["failure reason"] {
-                print("Failure: \(reason)")
-                return
-            }
-
-            guard let interval = dict["interval"] as? Int else {
-                fatalError("Missing fields")
-            }
-            self.interval = interval
-
-            logger.log("Starting intermittent tracker task", type: .trackerRequests)
-            trackerTask = Task {
-                logger.log("Intermittent tracker task has begun!", type: .trackerRequests)
-                while true {
-                    logger.log("Tracker task will wait", type: .trackerRequests)
-                    try await Task.sleep(nanoseconds: UInt64(self.interval) * NSEC_PER_SEC)
-                    logger.log("Tracker task will ping", type: .trackerRequests)
-                    try await regularTrackerPing()
-                }
-            }
-
-            if let trackerID = dict["tracker id"] as? String {
-                self.trackerID = trackerID
-            }
-
-            if let incomplete = dict["incomplete"] as? Int {
-                print("Peers with incomplete file: \(incomplete)")
-            } else {
-                print("No incomplete key!")
-            }
-            if let complete = dict["complete"] as? Int {
-                print("Peers with complete file: \(complete)")
-            } else {
-                print("No complete key!")
-            }
-
-            logger.log("Attempting to convert peers dict", type: .peerDataParsing)
-            guard let peersDict = dict["peers"] as? [[String: Any]] else {
-                fatalError("No peers!")
-            }
-            let peers = peersDict.map(PeerData.init(from:))
-            self.peers = peers
-            logger.log("Got peers!", type: .peerDataParsing)
-
-            peerManagementQueue.async {
-                while self.shim.socketOperationsShouldContinue {
-                    guard let peer = self.shim.nextPeerForConnection() else {
-                        continue
+                    guard let response = response as? HTTPURLResponse else {
+                        fatalError("Starting request had invalid response")
                     }
-                    logger.log("Attempting to form connection to new peer", type: .outgoingSocketConnections)
-                    //TODO: change queues
-                    //here we should move to peerQueue, because as it stands we only connect one at a time
-                    self.peerQueue.async {
-                        do {
-                            let s = try Socket.create()
-                            logger.log("Connecting to peer \(peer.peerID?.hexStringEncoded() ?? "<no peer id>") at \(peer.ip):\(peer.port)", type: .outgoingSocketConnections)
-                            try s.connect(to: peer.ip, port: peer.port)
-                            logger.log("Connected to peer \(peer.peerID?.hexStringEncoded() ?? "<no peer id>") at \(peer.ip):\(peer.port)", type: .outgoingSocketConnections)
-                            try s.write(from: self.handshake)
-                            logger.log("Wrote handshake to peer \(peer.peerID?.hexStringEncoded() ?? "<no peer id>") at \(peer.ip):\(peer.port)", type: .outgoingSocketConnections)
-                            var buf = Data()
-                            let bytesRead = try s.read(into: &buf, bytes: 68)
-                            logger.log("Read handshake from peer \(peer.peerID?.hexStringEncoded() ?? "<no peer id>") at \(peer.ip):\(peer.port)", type: .outgoingSocketConnections)
-                            //if the remote connection closes, might throw in above line, `bytesRead` might be 0, or might fail the below check
-                            guard !s.remoteConnectionClosed else {
-                                throw NSError(domain: "com.gauck.sam.torrentkit", code: 0, userInfo: nil) //the error doesn't matter because it gets caught immediately and ignored
-                            }
-                            guard bytesRead > 0 else {
-                                throw NSError(domain: "com.gauck.sam.torrentkit", code: 0, userInfo: nil)
-                            }
-                            let _infoHash = buf[28..<48]
-                            guard _infoHash == self.torrentFile.infoHash else {
-                                logger.log("Peer \(peer.peerID?.hexStringEncoded() ?? "<no peer id>") at \(peer.ip):\(peer.port) had infoHash \(_infoHash.hexStringEncoded()) but this download has infoHash \(self.torrentFile.infoHash.hexStringEncoded()); closing socket", type: .outgoingSocketConnections)
-                                s.close() //should never happen because the peer would just close the connection
-                                throw NSError(domain: "com.gauck.sam.torrentkit", code: 0, userInfo: nil)
-                            }
-                            let _peerID = buf[48...]
-                            if let actualPeerID = peer.peerID {
-                                guard actualPeerID == _peerID else {
-                                    logger.log("Peer \(actualPeerID.hexStringEncoded()) at \(peer.ip):\(peer.port) somehow changed to peerID \(_peerID.hexStringEncoded())", type: .outgoingSocketConnections)
-                                    s.close()
-                                    throw NSError(domain: "com.gauck.sam.torrentkit", code: 0, userInfo: nil)
-                                }
-                            } else {
-                                logger.log("Peer at \(peer.ip):\(peer.port) reported its peerID as \(_peerID.hexStringEncoded())", type: .outgoingSocketConnections)
-                            }
-                            self.addPeerSocket(s)
-                        } catch {
-                            logger.log("Caught an error while trying to connect to peer \(peer.peerID?.hexStringEncoded() ?? "<no peer id>") at \(peer.ip):\(peer.port) (most likely custom error); ignoring (continues to next peer)", type: .outgoingSocketConnections)
-                            self.shim.failedToConnectToPeer()
+                    guard response.statusCode == 200 else {
+                        try? data.write(to: .init(fileURLWithPath: "/tmp/debug.dat"))
+                        dump(data)
+                        dump(response)
+                        fatalError("Starting request had valid response with non-OK error code")
+                    }
+
+                    guard let obj = try? Bencoding.object(from: data), let dict = obj as? [String: Any] else {
+                        try! data.write(to: .init(fileURLWithPath: "/tmp/start.dat"))
+                        fatalError("/tmp/start.dat")
+                    }
+
+                    if let reason = dict["failure reason"] {
+                        print("Failure: \(reason)")
+                        return
+                    }
+
+                    guard let interval = dict["interval"] as? Int else {
+                        fatalError("Missing fields")
+                    }
+                    self.interval = interval
+
+                    logger.log("Starting intermittent tracker task", type: .trackerRequests)
+                    trackerTask = Task {
+                        logger.log("Intermittent tracker task has begun!", type: .trackerRequests)
+                        while true {
+                            logger.log("Tracker task will wait", type: .trackerRequests)
+                            try await Task.sleep(nanoseconds: UInt64(self.interval) * NSEC_PER_SEC)
+                            logger.log("Tracker task will ping", type: .trackerRequests)
+                            try await regularTrackerPing()
                         }
                     }
+
+                    if let trackerID = dict["tracker id"] as? String {
+                        self.trackerID = trackerID
+                    }
+
+                    if let incomplete = dict["incomplete"] as? Int {
+                        print("Peers with incomplete file: \(incomplete)")
+                    } else {
+                        print("No incomplete key!")
+                    }
+                    if let complete = dict["complete"] as? Int {
+                        print("Peers with complete file: \(complete)")
+                    } else {
+                        print("No complete key!")
+                    }
+
+                    logger.log("Attempting to convert peers dict", type: .peerDataParsing)
+                    guard let peersDict = dict["peers"] as? [[String: Any]] else {
+                        fatalError("No peers!")
+                    }
+                    let peers = peersDict.map(PeerData.init(from:))
+                    self.peers = peers
+                    logger.log("Got peers!", type: .peerDataParsing)
+
+                    peerManagementQueue.async {
+                        while self.shim.socketOperationsShouldContinue {
+                            guard let peer = self.shim.nextPeerForConnection() else {
+                                continue
+                            }
+                            logger.log("Attempting to form connection to new peer", type: .outgoingSocketConnections)
+                            //TODO: change queues
+                            //here we should move to peerQueue, because as it stands we only connect one at a time
+                            self.peerQueue.async {
+                                do {
+                                    let s = try Socket.create()
+                                    logger.log("Connecting to peer \(peer.peerID?.hexStringEncoded() ?? "<no peer id>") at \(peer.ip):\(peer.port)", type: .outgoingSocketConnections)
+                                    try s.connect(to: peer.ip, port: peer.port)
+                                    logger.log("Connected to peer \(peer.peerID?.hexStringEncoded() ?? "<no peer id>") at \(peer.ip):\(peer.port)", type: .outgoingSocketConnections)
+                                    try s.write(from: self.handshake)
+                                    logger.log("Wrote handshake to peer \(peer.peerID?.hexStringEncoded() ?? "<no peer id>") at \(peer.ip):\(peer.port)", type: .outgoingSocketConnections)
+                                    var buf = Data()
+                                    let bytesRead = try s.read(into: &buf, bytes: 68)
+                                    logger.log("Read handshake from peer \(peer.peerID?.hexStringEncoded() ?? "<no peer id>") at \(peer.ip):\(peer.port)", type: .outgoingSocketConnections)
+                                    //if the remote connection closes, might throw in above line, `bytesRead` might be 0, or might fail the below check
+                                    guard !s.remoteConnectionClosed else {
+                                        throw NSError(domain: "com.gauck.sam.torrentkit", code: 0, userInfo: nil) //the error doesn't matter because it gets caught immediately and ignored
+                                    }
+                                    guard bytesRead > 0 else {
+                                        throw NSError(domain: "com.gauck.sam.torrentkit", code: 0, userInfo: nil)
+                                    }
+                                    let _infoHash = buf[28..<48]
+                                    guard _infoHash == self.torrentFile.infoHash else {
+                                        logger.log("Peer \(peer.peerID?.hexStringEncoded() ?? "<no peer id>") at \(peer.ip):\(peer.port) had infoHash \(_infoHash.hexStringEncoded()) but this download has infoHash \(self.torrentFile.infoHash.hexStringEncoded()); closing socket", type: .outgoingSocketConnections)
+                                        s.close() //should never happen because the peer would just close the connection
+                                        throw NSError(domain: "com.gauck.sam.torrentkit", code: 0, userInfo: nil)
+                                    }
+                                    let _peerID = buf[48...]
+                                    if let actualPeerID = peer.peerID {
+                                        guard actualPeerID == _peerID else {
+                                            logger.log("Peer \(actualPeerID.hexStringEncoded()) at \(peer.ip):\(peer.port) somehow changed to peerID \(_peerID.hexStringEncoded())", type: .outgoingSocketConnections)
+                                            s.close()
+                                            throw NSError(domain: "com.gauck.sam.torrentkit", code: 0, userInfo: nil)
+                                        }
+                                    } else {
+                                        logger.log("Peer at \(peer.ip):\(peer.port) reported its peerID as \(_peerID.hexStringEncoded())", type: .outgoingSocketConnections)
+                                    }
+                                    self.addPeerSocket(s)
+                                } catch {
+                                    logger.log("Caught an error while trying to connect to peer \(peer.peerID?.hexStringEncoded() ?? "<no peer id>") at \(peer.ip):\(peer.port) (most likely custom error); ignoring (continues to next peer)", type: .outgoingSocketConnections)
+                                    self.shim.failedToConnectToPeer()
+                                }
+                            }
+                        }
+                    }
+
+                    state = .running
+                    return
+                }
+                catch {
+                    attempt += 1
+                    logger.log("Initial HTTP request attempt #\(attempt) failed", type: .trackerRequests)
                 }
             }
+            fatalError("Tried 5 times, but could not make valid HTTP request")
 
-            state = .running
             /* Here is an example response to a 'started' message
 
 
