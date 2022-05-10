@@ -1396,7 +1396,11 @@ public actor TorrentDownload {
                     return requests
                 }
                 if offset > next.offset {
-                    fatalError()
+                    dump(writtenSegments)
+                    dump(requests)
+                    print("offset=\(offset),next.offset=\(next.offset)")
+                    fatalError("Offset > next.offset when queueing requests; should never happen")
+                    //maybe if we get requests out of order?
                 }
                 if offset == next.offset {
                     //This better only happen for the first piece, or they should have been joined
