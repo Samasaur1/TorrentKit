@@ -542,11 +542,8 @@ public actor TorrentDownload {
                         if DEBUG {
                             print("Wrote handshake to peer \(peer.peerID.hexStringEncoded()) at \(peer.ip):\(peer.port)")
                         }
-                        let handshake_buf = UnsafeMutablePointer<CChar>.allocate(capacity: 68)
-                        defer {
-                            handshake_buf.deallocate()
-                        }
-                        let bytesRead = try s.read(into: handshake_buf, bufSize: 68, truncate: true)
+                        var buf = Data()
+                        let bytesRead = try s.read(into: &buf, bytes: 68)
                         if DEBUG {
                             print("Read handshake from peer \(peer.peerID.hexStringEncoded()) at \(peer.ip):\(peer.port)")
                         }
@@ -557,7 +554,7 @@ public actor TorrentDownload {
                         guard bytesRead > 0 else {
                             throw NSError(domain: "com.gauck.sam.torrentkit", code: 0, userInfo: nil)
                         }
-                        let _infoHash = Data(bytesNoCopy: handshake_buf + 28, count: 20, deallocator: .none)
+                        let _infoHash = buf[28..<48]
                         guard _infoHash == self.torrentFile.infoHash else {
                             if DEBUG {
                                 print("Peer \(peer.peerID.hexStringEncoded()) had infoHash \(_infoHash.hexStringEncoded()) but this download has infoHash \(self.torrentFile.infoHash.hexStringEncoded()); closing socket")
@@ -565,7 +562,7 @@ public actor TorrentDownload {
                             s.close() //should never happen because the peer would just close the connection
                             throw NSError(domain: "com.gauck.sam.torrentkit", code: 0, userInfo: nil)
                         }
-                        let _peerID = Data(bytes: handshake_buf + 48, count: 20)
+                        let _peerID = buf[48...]
                         guard peer.peerID == _peerID else {
                             if DEBUG {
                                 print("Peer \(peer.peerID.hexStringEncoded()) somehow changed to peerID \(_peerID.hexStringEncoded())")
