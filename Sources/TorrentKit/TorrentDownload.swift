@@ -507,43 +507,45 @@ public actor TorrentDownload {
                     logger.log("Attempting to form connection to new peer", type: .outgoingSocketConnections)
                     //TODO: change queues
                     //here we should move to peerQueue, because as it stands we only connect one at a time
-                    do {
-                        let s = try Socket.create()
-                        logger.log("Connecting to peer \(peer.peerID?.hexStringEncoded() ?? "<no peer id>") at \(peer.ip):\(peer.port)", type: .outgoingSocketConnections)
-                        try s.connect(to: peer.ip, port: peer.port)
-                        logger.log("Connected to peer \(peer.peerID?.hexStringEncoded() ?? "<no peer id>") at \(peer.ip):\(peer.port)", type: .outgoingSocketConnections)
-                        try s.write(from: self.handshake)
-                        logger.log("Wrote handshake to peer \(peer.peerID?.hexStringEncoded() ?? "<no peer id>") at \(peer.ip):\(peer.port)", type: .outgoingSocketConnections)
-                        var buf = Data()
-                        let bytesRead = try s.read(into: &buf, bytes: 68)
-                        logger.log("Read handshake from peer \(peer.peerID?.hexStringEncoded() ?? "<no peer id>") at \(peer.ip):\(peer.port)", type: .outgoingSocketConnections)
-                        //if the remote connection closes, might throw in above line, `bytesRead` might be 0, or might fail the below check
-                        guard !s.remoteConnectionClosed else {
-                            throw NSError(domain: "com.gauck.sam.torrentkit", code: 0, userInfo: nil) //the error doesn't matter because it gets caught immediately and ignored
-                        }
-                        guard bytesRead > 0 else {
-                            throw NSError(domain: "com.gauck.sam.torrentkit", code: 0, userInfo: nil)
-                        }
-                        let _infoHash = buf[28..<48]
-                        guard _infoHash == self.torrentFile.infoHash else {
-                            logger.log("Peer \(peer.peerID?.hexStringEncoded() ?? "<no peer id>") at \(peer.ip):\(peer.port) had infoHash \(_infoHash.hexStringEncoded()) but this download has infoHash \(self.torrentFile.infoHash.hexStringEncoded()); closing socket", type: .outgoingSocketConnections)
-                            s.close() //should never happen because the peer would just close the connection
-                            throw NSError(domain: "com.gauck.sam.torrentkit", code: 0, userInfo: nil)
-                        }
-                        let _peerID = buf[48...]
-                        if let actualPeerID = peer.peerID {
-                            guard actualPeerID == _peerID else {
-                                logger.log("Peer \(actualPeerID.hexStringEncoded()) at \(peer.ip):\(peer.port) somehow changed to peerID \(_peerID.hexStringEncoded())", type: .outgoingSocketConnections)
-                                s.close()
+                    self.peerQueue.async {
+                        do {
+                            let s = try Socket.create()
+                            logger.log("Connecting to peer \(peer.peerID?.hexStringEncoded() ?? "<no peer id>") at \(peer.ip):\(peer.port)", type: .outgoingSocketConnections)
+                            try s.connect(to: peer.ip, port: peer.port)
+                            logger.log("Connected to peer \(peer.peerID?.hexStringEncoded() ?? "<no peer id>") at \(peer.ip):\(peer.port)", type: .outgoingSocketConnections)
+                            try s.write(from: self.handshake)
+                            logger.log("Wrote handshake to peer \(peer.peerID?.hexStringEncoded() ?? "<no peer id>") at \(peer.ip):\(peer.port)", type: .outgoingSocketConnections)
+                            var buf = Data()
+                            let bytesRead = try s.read(into: &buf, bytes: 68)
+                            logger.log("Read handshake from peer \(peer.peerID?.hexStringEncoded() ?? "<no peer id>") at \(peer.ip):\(peer.port)", type: .outgoingSocketConnections)
+                            //if the remote connection closes, might throw in above line, `bytesRead` might be 0, or might fail the below check
+                            guard !s.remoteConnectionClosed else {
+                                throw NSError(domain: "com.gauck.sam.torrentkit", code: 0, userInfo: nil) //the error doesn't matter because it gets caught immediately and ignored
+                            }
+                            guard bytesRead > 0 else {
                                 throw NSError(domain: "com.gauck.sam.torrentkit", code: 0, userInfo: nil)
                             }
-                        } else {
-                            logger.log("Peer at \(peer.ip):\(peer.port) reported its peerID as \(_peerID.hexStringEncoded())", type: .outgoingSocketConnections)
+                            let _infoHash = buf[28..<48]
+                            guard _infoHash == self.torrentFile.infoHash else {
+                                logger.log("Peer \(peer.peerID?.hexStringEncoded() ?? "<no peer id>") at \(peer.ip):\(peer.port) had infoHash \(_infoHash.hexStringEncoded()) but this download has infoHash \(self.torrentFile.infoHash.hexStringEncoded()); closing socket", type: .outgoingSocketConnections)
+                                s.close() //should never happen because the peer would just close the connection
+                                throw NSError(domain: "com.gauck.sam.torrentkit", code: 0, userInfo: nil)
+                            }
+                            let _peerID = buf[48...]
+                            if let actualPeerID = peer.peerID {
+                                guard actualPeerID == _peerID else {
+                                    logger.log("Peer \(actualPeerID.hexStringEncoded()) at \(peer.ip):\(peer.port) somehow changed to peerID \(_peerID.hexStringEncoded())", type: .outgoingSocketConnections)
+                                    s.close()
+                                    throw NSError(domain: "com.gauck.sam.torrentkit", code: 0, userInfo: nil)
+                                }
+                            } else {
+                                logger.log("Peer at \(peer.ip):\(peer.port) reported its peerID as \(_peerID.hexStringEncoded())", type: .outgoingSocketConnections)
+                            }
+                            self.addPeerSocket(s)
+                        } catch {
+                            logger.log("Caught an error while trying to connect to peer \(peer.peerID?.hexStringEncoded() ?? "<no peer id>") at \(peer.ip):\(peer.port) (most likely custom error); ignoring (continues to next peer)", type: .outgoingSocketConnections)
+                            self.shim.failedToConnectToPeer()
                         }
-                        self.addPeerSocket(s)
-                    } catch {
-                        logger.log("Caught an error while trying to connect to peer \(peer.peerID?.hexStringEncoded() ?? "<no peer id>") at \(peer.ip):\(peer.port) (most likely custom error); ignoring (continues to next peer)", type: .outgoingSocketConnections)
-                        self.shim.failedToConnectToPeer()
                     }
                 }
             }
