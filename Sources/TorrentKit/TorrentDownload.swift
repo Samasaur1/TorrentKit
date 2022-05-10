@@ -1253,7 +1253,7 @@ public actor TorrentDownload {
         }
         var haves = self.shim._getHaves()
         haves[pieceIdx] = true
-        print("Piece \(pieceIdx) written; now \(haves.percentComplete)% complete")
+        print("Piece \(pieceIdx) written; now \(haves.percentComplete, stringFormat: "%.2f")% complete")
         self.shim._setHaves(haves)
         if haves.isComplete {
             print("Allegedly complete")
@@ -1748,5 +1748,11 @@ extension Data {
         guard count >= MemoryLayout.size(ofValue: value) else { return nil }
         _ = Swift.withUnsafeMutableBytes(of: &value, { copyBytes(to: $0)} )
         return value
+    }
+}
+
+extension String.StringInterpolation {
+    mutating func appendInterpolation(_ value: Double, stringFormat: String) {
+        appendLiteral(String(format: stringFormat, value))
     }
 }
