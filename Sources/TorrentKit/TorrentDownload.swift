@@ -13,6 +13,7 @@ import CryptoKit
 
 public var DEBUG = true
 public var SOCKETEE = false
+public var MAX_PEER_CONNECTIONS = 30
 
 public actor TorrentDownload {
     private struct PeerData {
@@ -83,7 +84,7 @@ public actor TorrentDownload {
         }
         func nextPeerForConnection() -> PeerData? {
             return shimPeerQueue.sync {
-                guard self.connectedPeers < 3 else {
+                guard self.connectedPeers < MAX_PEER_CONNECTIONS else {
                     return nil
                 }
                 guard !_peers.isEmpty else {
@@ -199,6 +200,16 @@ public actor TorrentDownload {
         var bitString: String {
             arr.map { $0 ? "1" : "0"}.joined(separator: "")
         }
+
+        var percentComplete: Double {
+            var successes = 0.0
+            for val in arr {
+                if val {
+                    successes += 1
+                }
+            }
+            return successes/Double(length)*100
+        }
     }
 
     private let torrentFile: TorrentFile
@@ -272,8 +283,6 @@ public actor TorrentDownload {
         self.torrentFile = torrentFile
         self.length = torrentFile.length
         self.handshake = Data([19]) + "BitTorrent protocol".data(using: .ascii)! + Data(repeating: 0, count: 8) + torrentFile.infoHash + self.peerID.data(using: .ascii)!
-        FileManager.default.createFile(atPath: "/tmp/\(torrentFile.singleFileMode!.name)", contents: nil)
-        self.handle = try! .init(forUpdating: .init(fileURLWithPath: "/tmp/\(torrentFile.singleFileMode!.name)"))
         urlEncodedInfoHash = torrentFile.infoHash.map { byte in
             switch byte {
             case 126:
@@ -296,10 +305,35 @@ public actor TorrentDownload {
                 //equivalent to String(byte, radix: 16, uppercase: true) but with padding
             }
         }.joined(separator: "")
-        self.shim._setHaves(Haves.empty(ofLength: torrentFile.pieceCount))
         state = .off
 
         print("piece length: \(torrentFile.pieceLength)")
+
+        func createOutputFileHandle() throws -> (FileHandle, Haves) {
+            var haves = Haves.empty(ofLength: torrentFile.pieceCount)
+            let path = URL(fileURLWithPath: "/tmp/\(torrentFile.singleFileMode!.name)")
+            if FileManager.default.fileExists(atPath: path.absoluteString) {
+                let handle = try FileHandle(forUpdating: path)
+                let length = torrentFile.pieceLength
+                for i in 0..<torrentFile.pieceCount {
+                    let data = try handle.read(upToCount: length)! //if less than length bytes are available, read to the end of the file
+                    let hash = Data(Insecure.SHA1.hash(data: data))
+                    if hash == torrentFile.pieces[i] {
+                        haves[i] = true
+                    }
+                }
+                return (handle, haves)
+            } else {
+                FileManager.default.createFile(atPath: path.absoluteString, contents: nil)
+                return (try FileHandle(forUpdating: path), haves)
+            }
+        }
+        guard let (handle, haves) = try? createOutputFileHandle() else {
+            print("Unable to create output file handle")
+            fatalError()
+        }
+        self.handle = handle
+        self.shim._setHaves(haves)
     }
 
     public func begin() {
@@ -1196,10 +1230,8 @@ public actor TorrentDownload {
             }
         }
         var haves = self.shim._getHaves()
-        print("our haves, pre-writing: \(haves.bitString)")
         haves[pieceIdx] = true
-        print("our haves, post-writing: \(haves.bitString)")
-        print("thinks it's complete: \(haves.isComplete)")
+        print("Piece \(pieceIdx) written; now \(haves.percentComplete)% complete")
         self.shim._setHaves(haves)
         if haves.isComplete {
             print("Allegedly complete")
@@ -1493,7 +1525,7 @@ public actor TorrentDownload {
                     case 5: //bitfield
                         let bitfield = Data(data[1...])
                         peerHaves = Haves(fromBitfield: bitfield, length: self.torrentFile.pieceCount)
-                        print("bitfield \(bitfield), with pieces \(peerHaves.bitString)")
+                        print("bitfield \(bitfield), \(peerHaves.percentComplete)% of file with pieces \(peerHaves.bitString)")
                     case 6: //request
                         let idx = UInt32(bigEndian: data[1..<5].to(type: UInt32.self)!)
                         let begin = UInt32(bigEndian: data[5..<9].to(type: UInt32.self)!)
@@ -1569,16 +1601,9 @@ public actor TorrentDownload {
                         print("port \(port)")
                     default: //invalid message
                         print("invalid message")
-                        print(data.first!)
-                        dump(data)
-                        if flagged {
-                            print("strike 2, closing")
-                            socket.close()
-                            throw NSError(domain: "com.gauck.sam.torrentkit", code: 0, userInfo: nil) //to break the loop
-                        } else {
-                            print("discarding but continuing")
-                            flagged = true
-                        }
+                        //I'm fairly certain previous invalid message errors I was getting were due to not reading all the bytes I wanted from a previous read call. I have changed my extension to Socket to make it wait until it has the requested amount of bytes, which appears to have fixed the problem
+                        socket.close()
+                        throw NSError(domain: "com.gauck.sam.torrentkit", code: 0, userInfo: nil) //to break the loop
                     }
 
                     //update variables (fetch from sync queue)
@@ -1607,8 +1632,9 @@ public actor TorrentDownload {
                             return !iHave && theyHave
                         }).randomElement() else {
                             //This socket does not have anything we want
+                            socket.close()
+                            throw NSError(domain: "com.gauck.sam.torrentkit", code: 0, userInfo: nil)
                             //TODO: stay connected to sockets who don't have anything
-                            fatalError("No idea how we could run out of pieces without being finished")
                         }
                         myCurrentWorkingPiece = UInt32(el.offset)
                         if DEBUG {
@@ -1627,6 +1653,9 @@ public actor TorrentDownload {
 //                    }
                     var message = Data()
                     for newPiece in newPieces {//haves
+                        if DEBUG {
+                            print("Informing peer that we have piece \(newPiece)")
+                        }
                         message += Data(from: UInt32(5).bigEndian) + [4] + Data(from: newPiece.bigEndian)
                     }
                     if !peerChoking {
