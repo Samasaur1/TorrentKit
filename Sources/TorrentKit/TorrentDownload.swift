@@ -1273,6 +1273,9 @@ public actor TorrentDownload {
         private let size: UInt32
         private let infoHash: Data
         private var writtenSegments: [WrittenSegment] = []
+        var totalData: UInt32 {
+            writtenSegments.map(\.length).reduce(0, +)
+        }
 
         init(idx: UInt32, size: UInt32, infoHash: Data) {
             self.idx = idx
@@ -1584,7 +1587,13 @@ public actor TorrentDownload {
                     }
                     if let idx = myCurrentWorkingPiece {
                         if localHavesCopy[idx] {
+                            //we were Vultured
                             logger.log("Another socket finished this piece", type: .peerSocket)
+                            if let count = myPieceData?.totalData {
+                                Task {
+                                    await self.reportDownloaded(bytes: Int(count))
+                                }
+                            }
                             myCurrentWorkingPiece = nil
                             myPieceData = nil
                         }
