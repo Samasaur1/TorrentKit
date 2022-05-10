@@ -14,7 +14,7 @@ import CryptoKit
 public var DEBUG = true
 public var SOCKETEE = false
 public var MAX_PEER_CONNECTIONS = 30
-public var logger = Logger([.stateChanges, .peerSocket])
+public var logger = Logger([.stateChanges])
 
 public actor TorrentDownload {
     private struct PeerData {
