@@ -275,6 +275,8 @@ public actor TorrentDownload {
     private var downloaded: Int = 0
     private var uploaded: Int = 0
 
+    public private(set) var completed: Bool
+
     public init(pathToTorrentFile url: URL) {
         //Swift complains if I say
 //        self.torrentFile = torrentFile(fromContentsOf: url)
@@ -312,8 +314,9 @@ public actor TorrentDownload {
         func createOutputFileHandle() throws -> (FileHandle, Haves) {
             var haves = Haves.empty(ofLength: torrentFile.pieceCount)
             let path = URL(fileURLWithPath: "/tmp/\(torrentFile.singleFileMode!.name)")
-            if FileManager.default.fileExists(atPath: path.absoluteString) {
+            if FileManager.default.fileExists(atPath: path.path) {
                 let handle = try FileHandle(forUpdating: path)
+                try handle.seek(toOffset: 0)
                 let length = torrentFile.pieceLength
                 for i in 0..<torrentFile.pieceCount {
                     let data = try handle.read(upToCount: length)! //if less than length bytes are available, read to the end of the file
@@ -324,7 +327,7 @@ public actor TorrentDownload {
                 }
                 return (handle, haves)
             } else {
-                FileManager.default.createFile(atPath: path.absoluteString, contents: nil)
+                FileManager.default.createFile(atPath: path.path, contents: nil)
                 return (try FileHandle(forUpdating: path), haves)
             }
         }
@@ -332,6 +335,7 @@ public actor TorrentDownload {
             print("Unable to create output file handle")
             fatalError()
         }
+        self.completed = haves.isComplete
         self.handle = handle
         self.shim._setHaves(haves)
     }
@@ -364,6 +368,10 @@ public actor TorrentDownload {
 //            }
 //        }
         precondition(state == .off)
+        guard !completed else {
+            print("Currently, once the torrent is complete, you cannot continue seeding")
+            exit(0)
+        }
         state = .beginning
         serverSocket = try! .create()
         if SOCKETEE {
@@ -1144,6 +1152,10 @@ public actor TorrentDownload {
              */
         }
     }
+    private func downloadCompleted() {
+        self.completed = true
+        self.stop()
+    }
 
     private func regularTrackerPing() async throws {
         if DEBUG {
@@ -1236,7 +1248,7 @@ public actor TorrentDownload {
         if haves.isComplete {
             print("Allegedly complete")
             Task {
-                await self.stop()
+                await self.downloadCompleted()
             }
         }
     }
@@ -1480,8 +1492,6 @@ public actor TorrentDownload {
                 var localHavesCopy = self.shim._getHaves()
                 var myCurrentWorkingPiece: UInt32? = nil
                 var myPieceData: PieceData? = nil
-
-                var flagged = false
 
                 try socket.write(from: localHavesCopy.makeMessage())
                 while self.shim.socketOperationsShouldContinue {
