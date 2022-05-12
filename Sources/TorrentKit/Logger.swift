@@ -35,7 +35,7 @@ public struct Logger {
         self.allowedLogTypes = allowedTypes
     }
 
-    func log(_ msg: String, type: LogType) {
+    func log(_ msg: String, type: LogType) { //TODO: make public
         if allowedLogTypes.contains(type) {
             print(msg)
         }

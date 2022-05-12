@@ -236,7 +236,7 @@ public actor TorrentDownload {
     private let peerQueue = DispatchQueue(label: "com.gauck.sam.torrentkit.queue.peer", attributes: .concurrent)
     private let writingQueue = DispatchQueue(label: "com.gauck.sam.torrentkit.queue.writing")
     private let listenQueue = DispatchQueue(label: "com.gauck.sam.torrentkit.queue.listen")
-    private let peerManagementQueue = DispatchQueue(label: "com.gauck.sam.torrentkiy.queue.peermanagement")
+    private let peerManagementQueue = DispatchQueue(label: "com.gauck.sam.torrentkit.queue.peermanagement")
     private let handle: FileHandle
     private let shim: AvoidActorIsolation = AvoidActorIsolation()
     private var serverSocket: Socket! {
@@ -1263,7 +1263,7 @@ public actor TorrentDownload {
     }
 
     struct PieceData {
-        struct WrittenSegment {
+        struct WrittenSegment { //TODO: make private
             static let MAX_LENGTH: UInt32 = 1 << 14 //2^14; 16KB
             let offset: UInt32
             let length: UInt32
@@ -1285,7 +1285,7 @@ public actor TorrentDownload {
         }
         let idx: UInt32
         private let size: UInt32
-        private let infoHash: Data
+        private let infoHash: Data //TODO: this is NOT an infoHash
         private var writtenSegments: [WrittenSegment] = []
         var totalData: UInt32 {
             writtenSegments.map(\.length).reduce(0, +)
@@ -1522,7 +1522,7 @@ public actor TorrentDownload {
                     case 5: //bitfield
                         let bitfield = Data(data[1...])
                         peerHaves = Haves(fromBitfield: bitfield, length: self.torrentFile.pieceCount)
-                        logger.log("Peer has \(peerHaves.percentComplete, stringFormat: "%.2f")% of the file (from bitfield)", type: .peerSocketDetailed)
+                        logger.log("Peer has \(peerHaves.percentComplete, stringFormat: "%.2f")% of the file (from bitfield)", type: .peerSocket)
                         logger.log("Peer bitfield is \(peerHaves.bitString)", type: .bitfields)
                     case 6: //request
                         let idx = UInt32(bigEndian: data[1..<5].to(type: UInt32.self)!)
@@ -1621,9 +1621,12 @@ public actor TorrentDownload {
                             logger.log("Socket completed piece \(myPieceData!.idx)", type: .peerSocket)
                             self.write(data, inPiece: myPieceData!.idx, beginningAt: 0)
                             myCurrentWorkingPiece = nil
+                        } else {
+                            //TODO: throw out the piece data and report downloaded bytes)
                         }
                     }
                     if myCurrentWorkingPiece == nil {
+                        //TODO: this should probably also use Haves.newPieces(fromOld:)
                         guard let el = zip(localHavesCopy.arr, peerHaves.arr).enumerated().filter({ idx, ziptup in
                             let (iHave, theyHave) = ziptup
                             return !iHave && theyHave
