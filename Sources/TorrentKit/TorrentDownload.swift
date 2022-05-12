@@ -1408,10 +1408,16 @@ public actor TorrentDownload {
                     return requests
                 }
                 if offset > next.offset {
+                    print("---- offset > next.offset")
                     dump(writtenSegments)
                     dump(requests)
                     print("offset=\(offset),next.offset=\(next.offset)")
+                    if offset >= next.offset + next.length {
+                        print("next piece subset of this piece; skipping")
+                        continue
+                    }
                     fatalError("Offset > next.offset when queueing requests; should never happen")
+                    //an actual overlap of pieces
                     //maybe if we get requests out of order?
                 }
                 if offset == next.offset {
