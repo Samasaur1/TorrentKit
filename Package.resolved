@@ -5,9 +5,18 @@
         "package": "BencodingKit",
         "repositoryURL": "https://github.com/Samasaur1/BencodingKit",
         "state": {
+          "branch": "fixes-for-bencodedump",
+          "revision": "dd827f53e9f670fb396e91b8af6a1dd6312b4eec",
+          "version": null
+        }
+      },
+      {
+        "package": "Socket",
+        "repositoryURL": "https://github.com/Kitura/BlueSocket",
+        "state": {
           "branch": null,
-          "revision": "70dafbf334fb401109c8bf5aa2b10dbb19e69a9f",
-          "version": "1.0.0"
+          "revision": "7b23a867008e0027bfd6f4d398d44720707bc8ca",
+          "version": "2.0.4"
         }
       }
     ]
