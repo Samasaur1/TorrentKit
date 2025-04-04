@@ -95,11 +95,10 @@ struct TorrentFile {
             fatalError()
         }
 
-        guard let hashStr = info["pieces"] as? String else {
+        guard let hash = info["pieces"] as? Data else {
             fatalError()
         }
 
-        let hash = hashStr.hashify()
         info["pieces"] = hash
         dict["info"] = info
 
